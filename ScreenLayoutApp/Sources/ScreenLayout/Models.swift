@@ -77,6 +77,57 @@ struct WindowPlacement: Codable, Identifiable, Hashable {
     var displayID: String
     var rect: UnitRect
     var spaceID: UUID? = nil
+    var drawer: DrawerEdge? = nil
+}
+
+enum DrawerEdge: String, Codable, CaseIterable {
+    case topLeft
+    case top
+    case topRight
+    case right
+    case bottomRight
+    case bottom
+    case bottomLeft
+    case left
+
+    var title: String {
+        switch self {
+        case .top: "Top"
+        case .topRight: "Top right"
+        case .right: "Right"
+        case .bottomRight: "Bottom right"
+        case .bottom: "Bottom"
+        case .bottomLeft: "Bottom left"
+        case .left: "Left"
+        case .topLeft: "Top left"
+        }
+    }
+
+    var isRight: Bool { [.topRight, .right, .bottomRight].contains(self) }
+    var isBottom: Bool { [.bottomLeft, .bottom, .bottomRight].contains(self) }
+    var isLeft: Bool { [.topLeft, .left, .bottomLeft].contains(self) }
+    var isTop: Bool { [.topLeft, .top, .topRight].contains(self) }
+
+    func frame(in display: CGRect, size: DrawerSize) -> CGRect {
+        let width = display.width * size.width
+        let height = display.height * size.height
+        let x = isRight ? display.maxX - width : (isLeft ? display.minX : display.midX - width / 2)
+        let y = isBottom ? display.maxY - height : (isTop ? display.minY : display.midY - height / 2)
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
+}
+
+struct DrawerSize: Codable, Hashable {
+    var width: Double
+    var height: Double
+
+    static func standard(for edge: DrawerEdge) -> DrawerSize {
+        switch edge {
+        case .left, .right: DrawerSize(width: 1.0 / 6.0, height: 1)
+        case .top, .bottom: DrawerSize(width: 1, height: 1.0 / 6.0)
+        default: DrawerSize(width: 0.25, height: 0.25)
+        }
+    }
 }
 
 enum SpaceKind: String, Codable {
@@ -107,12 +158,13 @@ struct Preferences: Codable {
     var modes = ["Default", "Work", "Personal"]
     var selectedMode = "Default"
     var grids: [String: GridSettings] = [:]
+    var drawers: [String: [String: DrawerSize]] = [:]
     var preferredLayouts: [String: UUID] = [:]
 
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case focusModesEnabled, autoRestoreOnDisplayChange, modes, selectedMode, grids, preferredLayouts
+        case focusModesEnabled, autoRestoreOnDisplayChange, modes, selectedMode, grids, drawers, preferredLayouts
     }
 
     init(from decoder: Decoder) throws {
@@ -122,6 +174,7 @@ struct Preferences: Codable {
         modes = try values.decodeIfPresent([String].self, forKey: .modes) ?? ["Default", "Work", "Personal"]
         selectedMode = try values.decodeIfPresent(String.self, forKey: .selectedMode) ?? "Default"
         grids = try values.decodeIfPresent([String: GridSettings].self, forKey: .grids) ?? [:]
+        drawers = try values.decodeIfPresent([String: [String: DrawerSize]].self, forKey: .drawers) ?? [:]
         preferredLayouts = try values.decodeIfPresent([String: UUID].self, forKey: .preferredLayouts) ?? [:]
     }
 }

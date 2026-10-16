@@ -33,6 +33,55 @@ enum WindowAccess {
         return value(root, kAXWindowsAttribute) ?? []
     }
 
+    static func focusedWindowID() -> UInt32 {
+        let system = AXUIElementCreateSystemWide()
+        if let focused: AXUIElement = value(system, kAXFocusedWindowAttribute) {
+            let id = SLWindowIDForAXElement(focused)
+            if id != 0 { return id }
+        }
+        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return 0 }
+        let root = AXUIElementCreateApplication(frontmost.processIdentifier)
+        guard let focused: AXUIElement = value(root, kAXFocusedWindowAttribute) else { return 0 }
+        return SLWindowIDForAXElement(focused)
+    }
+
+    static func windowID(for placement: WindowPlacement) -> UInt32 {
+        guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == placement.bundleID }) else { return 0 }
+        let candidates = windows(for: app)
+        let titled = candidates.first(where: { (value($0, kAXTitleAttribute) as String?) == placement.title })
+        let window = titled ?? (candidates.indices.contains(placement.ordinal) ? candidates[placement.ordinal] : nil)
+        return window.map(SLWindowIDForAXElement) ?? 0
+    }
+
+    static func setDrawerFrame(edge: DrawerEdge, expanded: Bool, display: CGRect,
+                               collapsedSize: DrawerSize, expandedRect: UnitRect,
+                               windowID: UInt32, bundleID: String) -> Bool {
+        guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }),
+              let window = windows(for: app).first(where: { SLWindowIDForAXElement($0) == windowID }) else { return false }
+        let frame = expanded ? expandedRect.frame(in: display) : edge.frame(in: display, size: collapsedSize)
+        var size = frame.size
+        guard let sizeValue = AXValueCreate(.cgSize, &size),
+              AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue) == .success else { return false }
+        let actualSize = self.size(window, kAXSizeAttribute) ?? frame.size
+        let x: CGFloat
+        if expanded {
+            x = min(display.maxX - actualSize.width, max(display.minX, frame.minX))
+        } else {
+            x = edge.isLeft ? display.minX - max(0, actualSize.width - frame.width)
+                : (edge.isRight ? display.maxX - frame.width : display.midX - actualSize.width / 2)
+        }
+        let y: CGFloat
+        if expanded {
+            y = min(display.maxY - actualSize.height, max(display.minY, frame.minY))
+        } else {
+            y = edge.isTop ? display.minY - max(0, actualSize.height - frame.height)
+                : (edge.isBottom ? display.maxY - frame.height : display.midY - actualSize.height / 2)
+        }
+        var origin = CGPoint(x: x, y: y)
+        guard let positionValue = AXValueCreate(.cgPoint, &origin) else { return false }
+        return AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue) == .success
+    }
+
     static func capture(displays: [DisplayInfo]) -> [WindowPlacement] {
         guard trusted else { return [] }
         var result: [WindowPlacement] = []

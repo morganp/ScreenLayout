@@ -23,6 +23,17 @@ import SpaceBridge
     private var debounce: Task<Void, Never>?
     private var focusTask: Task<Void, Never>?
     private var lastFocusError: String?
+    private struct ActiveDrawer {
+        let windowID: UInt32
+        let bundleID: String
+        let displayID: String
+        let edge: DrawerEdge
+        let expandedRect: UnitRect
+        var expanded = false
+    }
+    private var activeDrawers: [ActiveDrawer] = []
+    private var drawerTask: Task<Void, Never>?
+    private var activeDrawerLayoutID: UUID?
     private let fileURL: URL
 
     init() {
@@ -35,6 +46,7 @@ import SpaceBridge
         }
         migrateLegacyAssignments()
         migrateLegacySpaces()
+        migrateLegacyDrawers()
         refreshDisplays(reason: "Startup")
         refreshFocusNames()
         log("Accessibility trusted: \(accessibilityTrusted)")
@@ -80,6 +92,20 @@ import SpaceBridge
             for windowIndex in state.layouts[layoutIndex].windows.indices {
                 let displayID = state.layouts[layoutIndex].windows[windowIndex].displayID
                 state.layouts[layoutIndex].windows[windowIndex].spaceID = slots.first(where: { $0.displayID == displayID })?.id
+            }
+        }
+    }
+
+    private func migrateLegacyDrawers() {
+        for layoutIndex in state.layouts.indices {
+            for windowIndex in state.layouts[layoutIndex].windows.indices {
+                let placement = state.layouts[layoutIndex].windows[windowIndex]
+                guard let edge = placement.drawer,
+                      (edge == .left || edge == .right),
+                      abs(placement.rect.width - 1.0 / 6.0) < 0.02,
+                      placement.rect.height > 0.95 else { continue }
+                state.layouts[layoutIndex].windows[windowIndex].rect =
+                    UnitRect(x: edge == .left ? 0 : 0.5, y: 0, width: 0.5, height: 1)
             }
         }
     }
@@ -239,6 +265,32 @@ import SpaceBridge
         max(1, layout.spaces?.filter { $0.displayID == display.id && $0.kind == .desktop }.count ?? 1)
     }
 
+    func drawerSize(for edge: DrawerEdge, display: DisplayInfo) -> DrawerSize {
+        state.preferences.drawers[display.id]?[edge.rawValue] ?? .standard(for: edge)
+    }
+
+    func setDrawerSize(_ size: DrawerSize, for edge: DrawerEdge, display: DisplayInfo) {
+        var settings = state.preferences.drawers[display.id] ?? [:]
+        settings[edge.rawValue] = DrawerSize(width: min(1, max(0.05, size.width)),
+                                             height: min(1, max(0.05, size.height)))
+        state.preferences.drawers[display.id] = settings
+        refreshRestingDrawers(for: edge, display: display)
+    }
+
+    func resetDrawerSize(for edge: DrawerEdge, display: DisplayInfo) {
+        state.preferences.drawers[display.id]?.removeValue(forKey: edge.rawValue)
+        refreshRestingDrawers(for: edge, display: display)
+    }
+
+    private func refreshRestingDrawers(for edge: DrawerEdge, display: DisplayInfo) {
+        for drawer in activeDrawers where drawer.edge == edge && drawer.displayID == display.id && !drawer.expanded {
+            _ = WindowAccess.setDrawerFrame(edge: edge, expanded: false, display: display.visibleFrame,
+                                            collapsedSize: drawerSize(for: edge, display: display),
+                                            expandedRect: drawer.expandedRect,
+                                            windowID: drawer.windowID, bundleID: drawer.bundleID)
+        }
+    }
+
     func capture() {
         accessibilityTrusted = WindowAccess.trusted
         guard accessibilityTrusted else { WindowAccess.requestPermission(); status = "Accessibility is not trusted for this build"; log(status); return }
@@ -287,6 +339,10 @@ import SpaceBridge
     }
 
     private func restore(_ layout: SavedLayout) {
+        drawerTask?.cancel()
+        drawerTask = nil
+        activeDrawers = []
+        activeDrawerLayoutID = nil
         let slotsByDisplay = Dictionary(grouping: layout.spaces ?? [], by: \.displayID)
         if slotsByDisplay.values.contains(where: { $0.contains(where: { $0.kind == .fullScreen }) }) {
             status = "Full-screen Space slots cannot be applied yet"
@@ -311,6 +367,16 @@ import SpaceBridge
         }
         accessibilityTrusted = WindowAccess.trusted
         guard accessibilityTrusted else { WindowAccess.requestPermission(); status = "Accessibility is not trusted for this build"; log(status); return }
+        let restingPlacements = layout.windows.map { placement -> WindowPlacement in
+            var resting = placement
+            if let edge = placement.drawer,
+               let display = displays.first(where: { $0.id == placement.displayID }) {
+                resting.rect = UnitRect(edge.frame(in: display.visibleFrame,
+                                                   size: drawerSize(for: edge, display: display)),
+                                        in: display.visibleFrame)
+            }
+            return resting
+        }
         let multiSpace = slotsByDisplay.values.contains { $0.count > 1 }
         if multiSpace && !SLCanMoveWindows() {
             status = "Moving windows between Spaces is unavailable on this macOS build"
@@ -318,13 +384,81 @@ import SpaceBridge
             return
         }
         if multiSpace {
-            let result = WindowAccess.restoreAcrossSpaces(layout.windows, displays: displays, targetSpaces: targets)
+            let result = WindowAccess.restoreAcrossSpaces(restingPlacements, displays: displays, targetSpaces: targets)
             status = "Restored \(result.moved) windows; skipped \(result.skipped); Space moves failed \(result.spaceFailed)"
         } else {
-            let result = WindowAccess.restore(layout.windows, displays: displays)
+            let result = WindowAccess.restore(restingPlacements, displays: displays)
             status = "Restored \(result.moved) windows; skipped \(result.skipped)"
         }
         log("Restore ‘\(layout.name)’: \(status)")
+        startDrawers(for: layout)
+    }
+
+    func setDrawer(_ edge: DrawerEdge?, for windowID: UUID) {
+        guard let layoutIndex = state.layouts.firstIndex(where: { $0.id == selectedLayoutID }),
+              let windowIndex = state.layouts[layoutIndex].windows.firstIndex(where: { $0.id == windowID }) else { return }
+        let previous = state.layouts[layoutIndex].windows[windowIndex].drawer
+        state.layouts[layoutIndex].windows[windowIndex].drawer = edge
+        if previous == nil, let edge {
+            let size: DrawerSize
+            switch edge {
+            case .left, .right: size = DrawerSize(width: 0.5, height: 1)
+            case .top, .bottom: size = DrawerSize(width: 1, height: 0.5)
+            default: size = DrawerSize(width: 0.5, height: 0.5)
+            }
+            let displayID = state.layouts[layoutIndex].windows[windowIndex].displayID
+            if let display = displays.first(where: { $0.id == displayID }) {
+                state.layouts[layoutIndex].windows[windowIndex].rect = UnitRect(edge.frame(in: display.visibleFrame, size: size),
+                                                                              in: display.visibleFrame)
+            }
+        }
+        state.layouts[layoutIndex].savedAt = .now
+    }
+
+    private func startDrawers(for layout: SavedLayout) {
+        for placement in layout.windows {
+            guard let edge = placement.drawer,
+                  displays.contains(where: { $0.id == placement.displayID }) else { continue }
+            let windowID = WindowAccess.windowID(for: placement)
+            guard windowID != 0 else { log("Drawer window unavailable: \(placement.appName)"); continue }
+            guard let display = displays.first(where: { $0.id == placement.displayID }),
+                  WindowAccess.setDrawerFrame(edge: edge, expanded: false, display: display.visibleFrame,
+                                               collapsedSize: drawerSize(for: edge, display: display),
+                                               expandedRect: placement.rect,
+                                               windowID: windowID, bundleID: placement.bundleID) else {
+                log("Could not position drawer: \(placement.appName)")
+                continue
+            }
+            activeDrawers.append(ActiveDrawer(windowID: windowID, bundleID: placement.bundleID,
+                                              displayID: placement.displayID, edge: edge,
+                                              expandedRect: placement.rect))
+        }
+        guard !activeDrawers.isEmpty else { return }
+        activeDrawerLayoutID = layout.id
+        log("Started \(activeDrawers.count) edge drawer(s)")
+        drawerTask = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.updateDrawers()
+                try? await Task.sleep(for: .milliseconds(180))
+            }
+        }
+    }
+
+    private func updateDrawers() {
+        let focused = WindowAccess.focusedWindowID()
+        for index in activeDrawers.indices {
+            let expanded = activeDrawers[index].windowID == focused
+            guard expanded != activeDrawers[index].expanded,
+                  let display = displays.first(where: { $0.id == activeDrawers[index].displayID }) else { continue }
+            let drawer = activeDrawers[index]
+            if WindowAccess.setDrawerFrame(edge: drawer.edge, expanded: expanded, display: display.visibleFrame,
+                                            collapsedSize: drawerSize(for: drawer.edge, display: display),
+                                            expandedRect: drawer.expandedRect,
+                                            windowID: drawer.windowID, bundleID: drawer.bundleID) {
+                activeDrawers[index].expanded = expanded
+                log("\(expanded ? "Expanded" : "Collapsed") drawer: \(drawer.bundleID)")
+            }
+        }
     }
 
     func updateRect(windowID: UUID, rect: UnitRect) {
@@ -415,6 +549,12 @@ import SpaceBridge
 
     func deleteSelectedLayout() {
         guard let id = selectedLayoutID else { return }
+        if activeDrawerLayoutID == id {
+            drawerTask?.cancel()
+            drawerTask = nil
+            activeDrawers = []
+            activeDrawerLayoutID = nil
+        }
         state.layouts.removeAll { $0.id == id }
         state.preferences.preferredLayouts = state.preferences.preferredLayouts.filter { $0.value != id }
         selectedLayoutID = layoutForEditor?.id

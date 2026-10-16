@@ -70,13 +70,15 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 Picker("View", selection: $tab) {
                     Text("Layouts").tag(0)
-                    Text("Debug events").tag(1)
+                    Text("Drawers").tag(1)
+                    Text("Debug events").tag(2)
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 300)
+                .frame(width: 420)
                 .padding()
                 Divider()
                 if tab == 0 { LayoutEditor(store: store) }
+                else if tab == 1 { DrawerEditor(store: store) }
                 else { DebugView(store: store) }
             }
         }
@@ -197,6 +199,21 @@ struct LayoutEditor: View {
                     Toggle("Show all apps", isOn: $showAllApps)
                         .fixedSize()
                 }
+                if let selected = store.selectedWindowID {
+                    HStack {
+                        Picker("Window behavior", selection: Binding(
+                            get: { layout.windows.first(where: { $0.id == selected })?.drawer },
+                            set: { store.setDrawer($0, for: selected) })) {
+                                Text("Normal").tag(DrawerEdge?.none)
+                                ForEach(DrawerEdge.allCases, id: \.self) { edge in
+                                    Text("\(edge.title) drawer").tag(Optional(edge))
+                                }
+                            }
+                            .frame(width: 240)
+                        Text("Drag the grid outline to set the active size. The Drawers tab sets the resting size.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 HStack {
                     Picker("Grid", selection: Binding(
                         get: { store.grid(for: display).preset },
@@ -253,6 +270,84 @@ struct LayoutEditor: View {
             } else {
                 ContentUnavailableView("No layout selected", systemImage: "rectangle.on.rectangle",
                                        description: Text("Create a blank layout or capture the current screen to start."))
+            }
+        }
+        .padding()
+    }
+}
+
+struct DrawerEditor: View {
+    @Bindable var store: LayoutStore
+    @State private var selectedEdge: DrawerEdge = .right
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Drawer resting areas").font(.title2.bold())
+            Text("Choose one of eight positions, then set the area visible when its app is not active. Each monitor remembers its drawer sizes.")
+                .foregroundStyle(.secondary)
+            Picker("Monitor", selection: $store.selectedDisplayID) {
+                ForEach(store.displays) { display in Text(display.name).tag(Optional(display.id)) }
+            }
+            .frame(maxWidth: 400)
+            if let display = store.displays.first(where: { $0.id == store.selectedDisplayID }) {
+                let rows: [[DrawerEdge?]] = [
+                    [.topLeft, .top, .topRight],
+                    [.left, nil, .right],
+                    [.bottomLeft, .bottom, .bottomRight]
+                ]
+                HStack(alignment: .top, spacing: 24) {
+                    VStack(spacing: 8) {
+                        ForEach(rows.indices, id: \.self) { row in
+                            HStack(spacing: 8) {
+                                ForEach(rows[row].indices, id: \.self) { column in
+                                    if let edge = rows[row][column] {
+                                        Button(edge.title) { selectedEdge = edge }
+                                            .frame(width: 100, height: 55)
+                                            .background(selectedEdge == edge ? Color.accentColor.opacity(0.22) : Color.secondary.opacity(0.1),
+                                                        in: RoundedRectangle(cornerRadius: 8))
+                                    } else {
+                                        Text("Screen").frame(width: 100, height: 55)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text("\(selectedEdge.title) drawer").font(.headline)
+                        Stepper("Visible width: \(Int(store.drawerSize(for: selectedEdge, display: display).width * 100))%",
+                                value: Binding(
+                                    get: { store.drawerSize(for: selectedEdge, display: display).width },
+                                    set: { store.setDrawerSize(DrawerSize(width: $0,
+                                        height: store.drawerSize(for: selectedEdge, display: display).height),
+                                        for: selectedEdge, display: display) }),
+                                in: 0.05...1, step: 0.05)
+                        Stepper("Visible height: \(Int(store.drawerSize(for: selectedEdge, display: display).height * 100))%",
+                                value: Binding(
+                                    get: { store.drawerSize(for: selectedEdge, display: display).height },
+                                    set: { store.setDrawerSize(DrawerSize(width: store.drawerSize(for: selectedEdge, display: display).width,
+                                        height: $0), for: selectedEdge, display: display) }),
+                                in: 0.05...1, step: 0.05)
+                        Button("Reset this drawer") { store.resetDrawerSize(for: selectedEdge, display: display) }
+                        Text("Set the larger active size by dragging the window outline in Layouts.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: 340, alignment: .leading)
+                }
+                GeometryReader { geometry in
+                    let width = min(geometry.size.width, geometry.size.height * display.visibleFrame.width / display.visibleFrame.height)
+                    let height = width * display.visibleFrame.height / display.visibleFrame.width
+                    let preview = selectedEdge.frame(in: CGRect(x: 0, y: 0, width: width, height: height),
+                                                     size: store.drawerSize(for: selectedEdge, display: display))
+                    ZStack(alignment: .topLeading) {
+                        RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.1))
+                        RoundedRectangle(cornerRadius: 5).fill(Color.accentColor.opacity(0.45))
+                            .frame(width: preview.width, height: preview.height)
+                            .offset(x: preview.minX, y: preview.minY)
+                    }
+                    .frame(width: width, height: height)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .padding()
