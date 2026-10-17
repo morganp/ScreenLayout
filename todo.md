@@ -1,5 +1,12 @@
 # Todo
 
+## Control panel restructure
+
+- [x] Tabs Automation, Layouts, Snap, Drawers; Event log sheet and footer status bar; Settings window.
+- [x] Automation matrix (monitor sets by Focus mode), Layouts cards with grid dock, shared display picker.
+- [ ] Verify at runtime: matrix menus and live cell highlight, card selection, Space menu, Window settings popover, dock wrapping at 960 wide, Settings tabs and menu bar Settings item (also in background mode), light and dark appearance.
+- [ ] Double-click a layout name in the matrix to edit (currently a pencil button and menu item).
+
 ## Phase B: background and launch at login
 
 - [x] Shared `LayoutStore.shared` started by an app delegate, independent of any window.

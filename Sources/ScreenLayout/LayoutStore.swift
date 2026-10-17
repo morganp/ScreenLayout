@@ -65,6 +65,9 @@ import SpaceBridge
         migrateLegacySpaces()
         migrateLegacyDrawers()
         migrateCornerDrawers()
+        WindowAccess.diagnostics = { [weak self] message in
+            MainActor.assumeIsolated { self?.log(message) }
+        }
         refreshDisplays(reason: "Startup")
         refreshFocusNames()
         log("Accessibility trusted: \(accessibilityTrusted)")
@@ -203,6 +206,7 @@ import SpaceBridge
     }
 
     func addSpace(kind: SpaceKind) {
+        if kind == .desktop { refreshSpaces() }
         guard let layoutIndex = selectedLayoutIndex,
               let displayID = selectedDisplayID else { return }
         var slots = state.layouts[layoutIndex].spaces ?? []
@@ -213,6 +217,12 @@ import SpaceBridge
         state.layouts[layoutIndex].spaces = slots
         selectedSpaceID = slot.id
         ensureSelectedWindow()
+    }
+
+    func addDesktops(through number: Int, display: DisplayInfo) {
+        guard let layout = selectedLayout else { return }
+        let missing = number - requiredDesktopSpaces(for: layout, display: display)
+        for _ in 0..<max(1, missing) { addSpace(kind: .desktop) }
     }
 
     func moveSelectedSpace(_ offset: Int) {
@@ -484,7 +494,7 @@ import SpaceBridge
     private func refreshRestingDrawers(display: DisplayInfo) {
         for drawer in activeDrawers where drawer.displayID == display.id && !drawer.expanded {
             guard let target = restingTarget(for: drawer.edge, slot: drawer.slot, display: display) else { continue }
-            _ = WindowAccess.setDrawerFrame(edge: target.key.edge, expanded: false, display: display.visibleFrame,
+            _ = WindowAccess.setDrawerFrame(edge: target.key.edge, expanded: false, display: display,
                                             restingFrame: target.frame, expandedRect: drawer.expandedRect,
                                             windowID: drawer.windowID, bundleID: drawer.bundleID)
         }
@@ -619,7 +629,7 @@ import SpaceBridge
             guard windowID != 0 else { log("Drawer window unavailable: \(placement.appName)"); continue }
             guard let display = displays.first(where: { $0.id == placement.displayID }),
                   let target = restingTarget(for: edge, slot: placement.drawerSlot, display: display, placement: placement),
-                  WindowAccess.setDrawerFrame(edge: target.key.edge, expanded: false, display: display.visibleFrame,
+                  WindowAccess.setDrawerFrame(edge: target.key.edge, expanded: false, display: display,
                                                restingFrame: target.frame,
                                                expandedRect: placement.rect,
                                                windowID: windowID, bundleID: placement.bundleID) else {
@@ -656,7 +666,7 @@ import SpaceBridge
                   let display = displays.first(where: { $0.id == activeDrawers[index].displayID }) else { continue }
             let drawer = activeDrawers[index]
             guard let target = restingTarget(for: drawer.edge, slot: drawer.slot, display: display) else { continue }
-            if WindowAccess.setDrawerFrame(edge: target.key.edge, expanded: expanded, display: display.visibleFrame,
+            if WindowAccess.setDrawerFrame(edge: target.key.edge, expanded: expanded, display: display,
                                             restingFrame: target.frame,
                                             expandedRect: drawer.expandedRect,
                                             windowID: drawer.windowID, bundleID: drawer.bundleID) {
@@ -828,22 +838,48 @@ import SpaceBridge
         ensureSelectedWindow()
     }
 
-    func isAssigned(_ layout: SavedLayout, to mode: String) -> Bool {
-        state.preferences.preferredLayouts[assignmentKey(mode, displaySet)] == layout.id
+    func assignedLayoutID(mode: String, displaySet: String) -> UUID? {
+        state.preferences.preferredLayouts[assignmentKey(mode, displaySet)]
     }
 
-    func setAssigned(_ assigned: Bool, layout: SavedLayout, to mode: String) {
-        guard layout.displaySet == displaySet else { return }
+    // Writes or clears the layout a Focus mode uses for a monitor set (the same preferredLayouts data).
+    func assign(_ layout: SavedLayout?, mode: String, displaySet: String) {
         let key = assignmentKey(mode, displaySet)
-        if assigned { state.preferences.preferredLayouts[key] = layout.id }
-        else if state.preferences.preferredLayouts[key] == layout.id { state.preferences.preferredLayouts.removeValue(forKey: key) }
-        log("\(assigned ? "Assigned" : "Removed") ‘\(layout.name)’ \(assigned ? "to" : "from") \(mode) for current displays")
+        if let layout {
+            guard layout.displaySet == displaySet else { return }
+            state.preferences.preferredLayouts[key] = layout.id
+            log("Assigned ‘\(layout.name)’ to \(mode) for \(displaySet == self.displaySet ? "current displays" : "another display set")")
+        } else if state.preferences.preferredLayouts.removeValue(forKey: key) != nil {
+            log("Cleared \(mode) assignment for \(displaySet == self.displaySet ? "current displays" : "another display set")")
+        }
     }
 
-    func assignSelectedToAllFocuses() {
-        guard let layout = selectedLayout else { return }
-        for mode in selectableFocusNames { setAssigned(true, layout: layout, to: mode) }
+    func assignedModes(of layout: SavedLayout) -> [String] {
+        let suffix = "|\(layout.displaySet)"
+        return state.preferences.preferredLayouts.compactMap { key, id in
+            id == layout.id && key.hasSuffix(suffix) ? String(key.dropLast(suffix.count)) : nil
+        }.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
+
+    // Every display set with a saved layout, plus the connected set, the connected set first.
+    var monitorSets: [String] {
+        var sets = [displaySet]
+        for layout in state.layouts where !sets.contains(layout.displaySet) { sets.append(layout.displaySet) }
+        return sets
+    }
+
+    func layouts(forDisplaySet set: String) -> [SavedLayout] {
+        state.layouts.filter { $0.displaySet == set }.sorted { $0.savedAt > $1.savedAt }
+    }
+
+    func displayNames(forDisplaySet set: String) -> [String] {
+        set.split(separator: "+").map { id in
+            displays.first { $0.id == id }?.name ?? "Disconnected display \(id.prefix(4))"
+        }
+    }
+
+    var appliedLayout: SavedLayout? { activeLayout }
+    var activeDrawerCount: Int { activeDrawers.count }
 
     func duplicateSelectedLayout() {
         guard var layout = selectedLayout else { return }

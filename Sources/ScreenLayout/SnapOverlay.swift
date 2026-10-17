@@ -260,9 +260,9 @@ final class SnapGridView: NSView {
         guard let target, selection != lastApplied else { return }
         lastApplied = selection
         if let selection, let frame = liveFrame(for: selection) {
-            WindowAccess.place(target, at: frame, within: display?.visibleFrame)
+            WindowAccess.place(target, at: frame, display: display)
         } else if let original {
-            WindowAccess.place(target, at: original)
+            WindowAccess.place(target, at: original, display: display)
         }
     }
 

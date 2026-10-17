@@ -61,10 +61,78 @@ enum WindowAccess {
         return AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue) == .success
     }
 
-    private static func setFrame(_ window: AXUIElement, _ frame: CGRect) -> Bool {
+    // Position, size, position: the first move lets the target display clamp the origin, the size then
+    // fits the new location and the last move corrects any shift the size change caused.
+    private static func applyFrame(_ window: AXUIElement, _ frame: CGRect) -> Bool {
+        let first = setPosition(window, frame.origin)
         let sized = setSize(window, frame.size)
-        let positioned = setPosition(window, frame.origin)
-        return sized && positioned
+        let last = setPosition(window, frame.origin)
+        return first && sized && last
+    }
+
+    // Set by LayoutStore so placement mismatches reach the footer Event log.
+    nonisolated(unsafe) static var diagnostics: ((String) -> Void)?
+    nonisolated(unsafe) private static var reported: [UInt32: CGRect] = [:]
+
+    // Call at the start of a restore so a repeated mismatch is logged again.
+    static func resetDiagnostics() { reported = [:] }
+
+    private static func describe(_ rect: CGRect) -> String {
+        "(\(Int(rect.minX.rounded())), \(Int(rect.minY.rounded()))) \(Int(rect.width.rounded()))x\(Int(rect.height.rounded()))"
+    }
+
+    private static func differs(_ actual: CGRect, _ target: CGRect, size: Bool, tolerance: CGFloat) -> Bool {
+        abs(actual.minX - target.minX) > tolerance || abs(actual.minY - target.minY) > tolerance
+            || (size && (abs(actual.width - target.width) > tolerance || abs(actual.height - target.height) > tolerance))
+    }
+
+    // Logs once per window and target when the read-back frame is more than 2 points from the target.
+    private static func report(_ window: AXUIElement, requested: CGRect, target: CGRect, actual: CGRect?,
+                               display: DisplayInfo?, checkSize: Bool) {
+        guard let actual, differs(actual, target, size: checkSize, tolerance: 2) else { return }
+        let id = SLWindowIDForAXElement(window)
+        if reported[id] == target { return }
+        reported[id] = target
+        var pid: pid_t = 0
+        _ = AXUIElementGetPid(window, &pid)
+        let name = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "pid \(pid)"
+        let clamped = requested == target ? "" : ", clamped to \(describe(target))"
+        diagnostics?("\(name) placement differs: requested \(describe(requested))\(clamped), actual \(describe(actual)), display \(display?.name ?? "unknown") usable \(display.map { describe($0.usableFrame) } ?? "unknown")")
+    }
+
+    // The target limited to the area macOS will accept (below the menu bar, clear of a visible Dock).
+    // It never changes the saved rectangle.
+    private static func clamped(_ frame: CGRect, to usable: CGRect?) -> CGRect {
+        guard let usable, usable.width > 0, usable.height > 0 else { return frame }
+        let width = min(frame.width, usable.width)
+        let height = min(frame.height, usable.height)
+        return CGRect(x: min(max(frame.minX, usable.minX), usable.maxX - width),
+                      y: min(max(frame.minY, usable.minY), usable.maxY - height),
+                      width: width, height: height)
+    }
+
+    // Moves the window inside `usable` when an enforced minimum size left it overhanging.
+    private static func fit(_ window: AXUIElement, in usable: CGRect?) {
+        guard let usable, let actual = frame(of: window) else { return }
+        let x = min(max(actual.minX, usable.minX), max(usable.minX, usable.maxX - actual.width))
+        let y = min(max(actual.minY, usable.minY), max(usable.minY, usable.maxY - actual.height))
+        if abs(x - actual.minX) > 1 || abs(y - actual.minY) > 1 { _ = setPosition(window, CGPoint(x: x, y: y)) }
+    }
+
+    // The one way any path places a window: clamp to the display's usable area, set position, size,
+    // position, read the frame back and retry once if it differs, then log a lasting mismatch.
+    @discardableResult
+    static func setFrame(_ window: AXUIElement, _ requested: CGRect, display: DisplayInfo?) -> Bool {
+        let target = clamped(requested, to: display?.usableFrame)
+        var ok = applyFrame(window, target)
+        var actual = frame(of: window)
+        if let current = actual, differs(current, target, size: true, tolerance: 1) {
+            Thread.sleep(forTimeInterval: 0.05)
+            ok = applyFrame(window, target)
+            actual = frame(of: window)
+        }
+        report(window, requested: requested, target: target, actual: actual, display: display, checkSize: true)
+        return ok
     }
 
     static func focusedWindow() -> AXUIElement? {
@@ -96,17 +164,13 @@ enum WindowAccess {
         return CGRect(origin: origin, size: extent)
     }
 
-    // Moves then sizes, which suits snapping across displays, then keeps the result inside bounds
-    // when the app enforced a larger minimum size.
+    // Snap and undo placement; shares setFrame, then keeps the window inside the usable area when the
+    // app enforced a larger minimum size.
     @discardableResult
-    static func place(_ window: AXUIElement, at frame: CGRect, within bounds: CGRect? = nil) -> Bool {
-        let positioned = setPosition(window, frame.origin)
-        let sized = setSize(window, frame.size)
-        guard let bounds, let actual = self.frame(of: window) else { return positioned && sized }
-        let x = min(max(actual.minX, bounds.minX), max(bounds.minX, bounds.maxX - actual.width))
-        let y = min(max(actual.minY, bounds.minY), max(bounds.minY, bounds.maxY - actual.height))
-        if abs(x - actual.minX) > 1 || abs(y - actual.minY) > 1 { _ = setPosition(window, CGPoint(x: x, y: y)) }
-        return positioned && sized
+    static func place(_ window: AXUIElement, at frame: CGRect, display: DisplayInfo? = nil) -> Bool {
+        let ok = setFrame(window, frame, display: display)
+        fit(window, in: display?.usableFrame)
+        return ok
     }
 
     static func placement(for window: AXUIElement, displays: [DisplayInfo]) -> WindowPlacement? {
@@ -146,29 +210,41 @@ enum WindowAccess {
         return match(placement, in: windows(for: app), claimed: claimed).map(SLWindowIDForAXElement) ?? 0
     }
 
-    static func setDrawerFrame(edge: DrawerEdge, expanded: Bool, display: CGRect,
+    static func setDrawerFrame(edge: DrawerEdge, expanded: Bool, display info: DisplayInfo,
                                restingFrame: CGRect, expandedRect: UnitRect,
                                windowID: UInt32, bundleID: String) -> Bool {
         guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }),
               let window = windows(for: app).first(where: { SLWindowIDForAXElement($0) == windowID }) else { return false }
-        let frame = expanded ? expandedRect.frame(in: display) : restingFrame
+        let display = info.visibleFrame
+        let usable = info.usableFrame
+        if expanded {
+            let ok = setFrame(window, expandedRect.frame(in: display), display: info)
+            fit(window, in: usable)
+            return ok
+        }
+        // Resting: a window with a minimum size larger than the strip is pushed off-screen so only
+        // the strip shows, so only the position is verified.
+        let frame = restingFrame
+        _ = setPosition(window, frame.origin)
         guard setSize(window, frame.size) else { return false }
         let actualSize = self.size(window, kAXSizeAttribute) ?? frame.size
-        let x: CGFloat
-        if expanded {
-            x = min(display.maxX - actualSize.width, max(display.minX, frame.minX))
-        } else {
-            x = edge.isLeft ? display.minX - max(0, actualSize.width - frame.width)
-                : (edge.isRight ? display.maxX - frame.width : frame.midX - actualSize.width / 2)
+        let x = edge.isLeft ? display.minX - max(0, actualSize.width - frame.width)
+            : (edge.isRight ? display.maxX - frame.width : frame.midX - actualSize.width / 2)
+        let y = edge.isTop ? display.minY - max(0, actualSize.height - frame.height)
+            : (edge.isBottom ? display.maxY - frame.height : frame.midY - actualSize.height / 2)
+        var ok = setPosition(window, CGPoint(x: x, y: y))
+        // macOS keeps a window below the menu bar, so that is where a top strip can rest.
+        let expectedY = max(y, usable.minY)
+        let expected = CGRect(x: x, y: expectedY, width: actualSize.width, height: actualSize.height)
+        var actual = self.frame(of: window)
+        if let current = actual, differs(current, expected, size: false, tolerance: 1) {
+            Thread.sleep(forTimeInterval: 0.05)
+            ok = applyFrame(window, CGRect(origin: CGPoint(x: x, y: y), size: actualSize))
+            actual = self.frame(of: window)
         }
-        let y: CGFloat
-        if expanded {
-            y = min(display.maxY - actualSize.height, max(display.minY, frame.minY))
-        } else {
-            y = edge.isTop ? display.minY - max(0, actualSize.height - frame.height)
-                : (edge.isBottom ? display.maxY - frame.height : frame.midY - actualSize.height / 2)
-        }
-        return setPosition(window, CGPoint(x: x, y: y))
+        report(window, requested: CGRect(origin: CGPoint(x: x, y: y), size: frame.size), target: expected,
+               actual: actual, display: info, checkSize: false)
+        return ok
     }
 
     static func capture(displays: [DisplayInfo]) -> [WindowPlacement] {
@@ -191,6 +267,7 @@ enum WindowAccess {
         var moved = 0
         var skipped = 0
         var claimed: Set<UInt32> = []
+        resetDiagnostics()
         for placement in placements {
             guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == placement.bundleID }),
                   let display = displays.first(where: { $0.id == placement.displayID }) else {
@@ -199,7 +276,7 @@ enum WindowAccess {
             }
             guard let window = match(placement, in: windows(for: app), claimed: claimed) else { skipped += 1; continue }
             claimed.insert(SLWindowIDForAXElement(window))
-            if setFrame(window, placement.rect.frame(in: display.visibleFrame)) { moved += 1 } else { skipped += 1 }
+            if setFrame(window, placement.rect.frame(in: display.visibleFrame), display: display) { moved += 1 } else { skipped += 1 }
         }
         return (moved, skipped)
     }
@@ -211,6 +288,7 @@ enum WindowAccess {
         var skipped = 0
         var spaceFailed = 0
         var usedWindowIDs: Set<UInt32> = []
+        resetDiagnostics()
         for placement in placements {
             guard let slotID = placement.spaceID, let targetSpace = targetSpaces[slotID],
                   let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == placement.bundleID }),
@@ -231,7 +309,7 @@ enum WindowAccess {
                 }
                 guard verified else { spaceFailed += 1; continue }
             }
-            if setFrame(window, placement.rect.frame(in: display.visibleFrame)) { moved += 1 } else { skipped += 1 }
+            if setFrame(window, placement.rect.frame(in: display.visibleFrame), display: display) { moved += 1 } else { skipped += 1 }
         }
         return (moved, skipped, spaceFailed)
     }

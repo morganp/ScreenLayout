@@ -67,6 +67,21 @@ struct DisplayInfo: Identifiable, Hashable {
     let visibleFrame: CGRect
     let cgID: CGDirectDisplayID
 
+    // The area macOS lets windows occupy now: the display minus the menu bar and a visible Dock, in
+    // the same top-left Core Graphics space as `frame`. Read live because the Dock and menu bar change.
+    // Only used to clamp what is sent to a window; saved rectangles stay relative to `visibleFrame`.
+    var usableFrame: CGRect {
+        guard let screen = NSScreen.screens.first(where: {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == cgID
+        }) else { return visibleFrame }
+        let full = screen.frame
+        let visible = screen.visibleFrame
+        let usable = CGRect(x: frame.minX + (visible.minX - full.minX),
+                            y: frame.minY + (full.maxY - visible.maxY),
+                            width: visible.width, height: visible.height)
+        return usable.intersection(frame)
+    }
+
     static func current() -> [DisplayInfo] {
         NSScreen.screens.map { screen in
             let displayID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
