@@ -6,6 +6,7 @@ import Observation
 import SpaceBridge
 
 @MainActor @Observable final class LayoutStore {
+    static let shared = LayoutStore()
     var state = StoredState() { didSet { persist() } }
     var displays: [DisplayInfo] = []
     var displaySpaces: [DisplaySpaces] = []
@@ -20,6 +21,9 @@ import SpaceBridge
     var focusNames: [String] = []
     var focusCatalogError: String?
     var appToAdd = ""
+    var loginItemTick = 0
+    var snapHotkeyError: String?
+    var snapOverlayActive = false
     private var debounce: Task<Void, Never>?
     private var focusTask: Task<Void, Never>?
     private var lastFocusError: String?
@@ -28,7 +32,7 @@ import SpaceBridge
         let bundleID: String
         let displayID: String
         let edge: DrawerEdge
-        let expandedRect: UnitRect
+        var expandedRect: UnitRect
         var expanded = false
     }
     private var activeDrawers: [ActiveDrawer] = []
@@ -37,7 +41,7 @@ import SpaceBridge
     private let fileURL: URL
     private var didLoadState = false
 
-    init() {
+    private init() {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         let directory = base.appendingPathComponent("ScreenLayout", isDirectory: true)
@@ -231,6 +235,19 @@ import SpaceBridge
         accessibilityTrusted = trusted
     }
 
+    func refreshLoginItem() { loginItemTick += 1 }
+
+    func setLaunchAtLogin(_ on: Bool) {
+        do {
+            try LoginItem.set(on)
+            log(LoginItem.statusText)
+        } catch {
+            status = "Could not \(on ? "enable" : "disable") launch at login: \(error.localizedDescription)"
+            log(status)
+        }
+        refreshLoginItem()
+    }
+
     func refreshFocusNames() {
         let result = FocusCatalog.load()
         focusNames = result.names
@@ -246,7 +263,10 @@ import SpaceBridge
             try? await Task.sleep(for: .milliseconds(750))
             guard !Task.isCancelled else { return }
             self?.refreshDisplays(reason: "Display configuration changed")
-            if self?.state.preferences.autoRestoreOnDisplayChange == true { self?.restoreLatest() }
+            if self?.state.preferences.autoRestoreOnDisplayChange == true {
+                self?.log("Automatic restore: display configuration changed")
+                self?.restoreLatest()
+            }
         }
     }
 
@@ -470,6 +490,7 @@ import SpaceBridge
     }
 
     private func updateDrawers() {
+        guard !snapOverlayActive else { return }
         let focused = WindowAccess.focusedWindowID()
         for index in activeDrawers.indices {
             let expanded = activeDrawers[index].windowID == focused
@@ -493,6 +514,53 @@ import SpaceBridge
         adjusted.clamp()
         state.layouts[layoutIndex].windows[windowIndex].rect = adjusted
         state.layouts[layoutIndex].savedAt = .now
+    }
+
+    // Called after a snap commits. Keeps a running drawer in step and, with recordSnaps on,
+    // writes the snapped cells into the selected layout's matching placement (no gap).
+    func snapCommitted(window: AXUIElement, rect: UnitRect, display: DisplayInfo) {
+        let windowID = WindowAccess.windowID(of: window)
+        if windowID != 0, let index = activeDrawers.firstIndex(where: { $0.windowID == windowID }) {
+            activeDrawers[index].expandedRect = rect
+        }
+        guard state.preferences.recordSnaps else { return }
+        guard let layoutIndex = selectedLayoutIndex,
+              let windowIndex = WindowAccess.placementIndex(of: window, in: state.layouts[layoutIndex].windows) else {
+            log("Snap not recorded: no matching placement in the selected layout")
+            return
+        }
+        let id = state.layouts[layoutIndex].windows[windowIndex].id
+        if state.layouts[layoutIndex].windows[windowIndex].displayID != display.id { moveWindow(id, to: display.id) }
+        updateRect(windowID: id, rect: rect)
+        log("Snap recorded for \(state.layouts[layoutIndex].windows[windowIndex].appName)")
+    }
+
+    func captureFocusedWindow() {
+        accessibilityTrusted = WindowAccess.trusted
+        guard accessibilityTrusted else { WindowAccess.requestPermission(); status = "Accessibility is not trusted for this build"; log(status); return }
+        guard let layoutIndex = selectedLayoutIndex else { status = "Select a layout first"; log(status); return }
+        guard let window = WindowAccess.focusedWindow(),
+              var placement = WindowAccess.placement(for: window, displays: displays) else {
+            status = "No focused window to capture"
+            log(status)
+            return
+        }
+        if let existing = WindowAccess.placementIndex(of: window, in: state.layouts[layoutIndex].windows) {
+            let id = state.layouts[layoutIndex].windows[existing].id
+            if state.layouts[layoutIndex].windows[existing].displayID != placement.displayID { moveWindow(id, to: placement.displayID) }
+            updateRect(windowID: id, rect: placement.rect)
+            selectedWindowID = id
+            status = "Updated \(placement.appName) in ‘\(state.layouts[layoutIndex].name)’"
+        } else {
+            let slots = state.layouts[layoutIndex].spaces ?? []
+            placement.spaceID = slots.first(where: { $0.id == selectedSpaceID && $0.displayID == placement.displayID })?.id
+                ?? slots.first(where: { $0.displayID == placement.displayID })?.id
+            state.layouts[layoutIndex].windows.append(placement)
+            state.layouts[layoutIndex].savedAt = .now
+            selectedWindowID = placement.id
+            status = "Captured \(placement.appName) into ‘\(state.layouts[layoutIndex].name)’"
+        }
+        log(status)
     }
 
     func grid(for display: DisplayInfo) -> GridSettings {
@@ -519,8 +587,15 @@ import SpaceBridge
         log("Grid for \(display.name): \(setting.columns)×\(setting.rows)")
     }
 
+    func gridGeometry(for display: DisplayInfo) -> GridGeometry {
+        GridGeometry(grid(for: display), display: display)
+    }
+
     func setGridDimensions(columns: Int? = nil, rows: Int? = nil, for display: DisplayInfo) {
         var setting = grid(for: display)
+        let effective = gridGeometry(for: display)
+        setting.columns = effective.columns
+        setting.rows = effective.rows
         if let columns { setting.columns = min(32, max(2, columns)) }
         if let rows { setting.rows = min(32, max(2, rows)) }
         setting.preset = "custom"
@@ -530,6 +605,13 @@ import SpaceBridge
     func setSnapToGrid(_ enabled: Bool, for display: DisplayInfo) {
         var setting = grid(for: display)
         setting.snapToGrid = enabled
+        state.preferences.grids[display.id] = setting
+    }
+
+    func setMarkers(halves: Bool? = nil, thirds: Bool? = nil, for display: DisplayInfo) {
+        var setting = grid(for: display)
+        if let halves { setting.showHalfMarkers = halves }
+        if let thirds { setting.showThirdMarkers = thirds }
         state.preferences.grids[display.id] = setting
     }
 
@@ -662,6 +744,7 @@ import SpaceBridge
         if !state.preferences.modes.contains(mode) { state.preferences.modes.append(mode) }
         state.preferences.selectedMode = mode
         modeChanged()
+        log("Automatic restore: Focus changed to \(mode)")
         restoreLatest()
     }
 

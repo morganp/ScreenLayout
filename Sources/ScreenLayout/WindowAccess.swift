@@ -67,16 +67,78 @@ enum WindowAccess {
         return sized && positioned
     }
 
-    static func focusedWindowID() -> UInt32 {
+    static func focusedWindow() -> AXUIElement? {
         let system = AXUIElementCreateSystemWide()
-        if let focused: AXUIElement = value(system, kAXFocusedWindowAttribute) {
-            let id = SLWindowIDForAXElement(focused)
-            if id != 0 { return id }
+        if let focused: AXUIElement = value(system, kAXFocusedWindowAttribute),
+           SLWindowIDForAXElement(focused) != 0 { return focused }
+        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return nil }
+        return value(appElement(frontmost.processIdentifier), kAXFocusedWindowAttribute)
+    }
+
+    static func focusedWindowID() -> UInt32 {
+        focusedWindow().map { SLWindowIDForAXElement($0) } ?? 0
+    }
+
+    // The point is in Core Graphics global coordinates (origin top left of the primary display).
+    static func windowUnderCursor(at point: CGPoint) -> AXUIElement? {
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(point.x), Float(point.y), &hit) == .success,
+              let element = hit else { return nil }
+        AXUIElementSetMessagingTimeout(element, 1.0)
+        if let window: AXUIElement = value(element, kAXWindowAttribute) { return window }
+        return (value(element, kAXRoleAttribute) as String?) == kAXWindowRole ? element : nil
+    }
+
+    static func windowID(of window: AXUIElement) -> UInt32 { SLWindowIDForAXElement(window) }
+
+    static func frame(of window: AXUIElement) -> CGRect? {
+        guard let origin = point(window, kAXPositionAttribute), let extent = size(window, kAXSizeAttribute) else { return nil }
+        return CGRect(origin: origin, size: extent)
+    }
+
+    // Moves then sizes, which suits snapping across displays, then keeps the result inside bounds
+    // when the app enforced a larger minimum size.
+    @discardableResult
+    static func place(_ window: AXUIElement, at frame: CGRect, within bounds: CGRect? = nil) -> Bool {
+        let positioned = setPosition(window, frame.origin)
+        let sized = setSize(window, frame.size)
+        guard let bounds, let actual = self.frame(of: window) else { return positioned && sized }
+        let x = min(max(actual.minX, bounds.minX), max(bounds.minX, bounds.maxX - actual.width))
+        let y = min(max(actual.minY, bounds.minY), max(bounds.minY, bounds.maxY - actual.height))
+        if abs(x - actual.minX) > 1 || abs(y - actual.minY) > 1 { _ = setPosition(window, CGPoint(x: x, y: y)) }
+        return positioned && sized
+    }
+
+    static func placement(for window: AXUIElement, displays: [DisplayInfo]) -> WindowPlacement? {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(window, &pid) == .success,
+              let app = NSRunningApplication(processIdentifier: pid),
+              let bundleID = app.bundleIdentifier, bundleID != Bundle.main.bundleIdentifier else { return nil }
+        let ordinal = windows(for: app).firstIndex(where: { CFEqual($0, window) }) ?? 0
+        return makePlacement(app: app, bundleID: bundleID, window: window, ordinal: ordinal, displays: displays)
+    }
+
+    // Reverse of restore matching: finds the placement the shared matcher would assign to this window.
+    static func placementIndex(of window: AXUIElement, in placements: [WindowPlacement]) -> Int? {
+        let target = SLWindowIDForAXElement(window)
+        guard target != 0 else { return nil }
+        var claimed: Set<UInt32> = []
+        for (index, placement) in placements.enumerated() {
+            let id = windowID(for: placement, claimed: claimed)
+            if id == target { return index }
+            if id != 0 { claimed.insert(id) }
         }
-        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return 0 }
-        let root = appElement(frontmost.processIdentifier)
-        guard let focused: AXUIElement = value(root, kAXFocusedWindowAttribute) else { return 0 }
-        return SLWindowIDForAXElement(focused)
+        return nil
+    }
+
+    private static func makePlacement(app: NSRunningApplication, bundleID: String, window: AXUIElement,
+                                      ordinal: Int, displays: [DisplayInfo]) -> WindowPlacement? {
+        guard let frame = Self.frame(of: window), frame.width > 10, frame.height > 10,
+              let display = displays.max(by: { $0.frame.intersection(frame).area < $1.frame.intersection(frame).area }) else { return nil }
+        let title: String = value(window, kAXTitleAttribute) ?? ""
+        return WindowPlacement(bundleID: bundleID, appName: app.localizedName ?? bundleID,
+                               title: title, ordinal: ordinal, displayID: display.id,
+                               rect: UnitRect(frame, in: display.visibleFrame))
     }
 
     static func windowID(for placement: WindowPlacement, claimed: Set<UInt32> = []) -> UInt32 {
@@ -115,15 +177,10 @@ enum WindowAccess {
         for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
             guard let bundleID = app.bundleIdentifier, bundleID != Bundle.main.bundleIdentifier else { continue }
             for (ordinal, window) in windows(for: app).enumerated() {
-                guard let origin = point(window, kAXPositionAttribute),
-                      let extent = size(window, kAXSizeAttribute),
-                      extent.width > 10, extent.height > 10 else { continue }
-                let frame = CGRect(origin: origin, size: extent)
-                guard let display = displays.max(by: { $0.frame.intersection(frame).area < $1.frame.intersection(frame).area }) else { continue }
-                let title: String = value(window, kAXTitleAttribute) ?? ""
-                result.append(WindowPlacement(bundleID: bundleID, appName: app.localizedName ?? bundleID,
-                                              title: title, ordinal: ordinal, displayID: display.id,
-                                              rect: UnitRect(frame, in: display.visibleFrame)))
+                if let placement = makePlacement(app: app, bundleID: bundleID, window: window,
+                                                 ordinal: ordinal, displays: displays) {
+                    result.append(placement)
+                }
             }
         }
         return result

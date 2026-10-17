@@ -1,24 +1,75 @@
+import AppKit
 import SwiftUI
 
 @main struct ScreenLayoutApp: App {
-    @State private var store = LayoutStore()
+    @NSApplicationDelegateAdaptor(AppController.self) private var controller
+    private let store = LayoutStore.shared
 
     var body: some Scene {
-        WindowGroup("ScreenLayout") {
-            ContentView(store: store)
+        WindowGroup("ScreenLayout", id: "main") {
+            ContentView(store: store, controller: controller)
                 .frame(minWidth: 1000, minHeight: 680)
-                .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-                    store.refreshAccessibility()
-                    store.refreshFocusNames()
-                    store.refreshSpaces()
-                }
         }
         .defaultSize(width: 1180, height: 760)
+        .defaultLaunchBehavior(AppController.launchedAtLogin ? .suppressed : .presented)
+
+        MenuBarExtra {
+            MenuBarContent(store: store, controller: controller)
+        } label: {
+            MenuBarLabel(controller: controller)
+        }
+        .menuBarExtraStyle(.menu)
+    }
+}
+
+struct MenuBarLabel: View {
+    let controller: AppController
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Image(systemName: "rectangle.3.group")
+            .task { controller.openWindowAction = { openWindow(id: "main") } }
+    }
+}
+
+struct MenuBarContent: View {
+    @Bindable var store: LayoutStore
+    let controller: AppController
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        let _ = store.loginItemTick
+        Text(store.status)
+        Text(LoginItem.statusText)
+        Divider()
+        Button("Restore selected layout", action: store.restoreSelected)
+            .disabled(store.selectedLayout == nil)
+        Button("Restore matching layout for current displays", action: store.restoreLatest)
+        Button("Snap window…") { SnapController.shared.showAfterMenu() }
+        Button("Capture focused window into selected layout") { SnapController.shared.captureFocusedWindowAfterMenu() }
+            .disabled(store.selectedLayout == nil)
+        Button("Open ScreenLayout") {
+            controller.openWindowAction = { openWindow(id: "main") }
+            controller.showMainWindow()
+        }
+        Divider()
+        Toggle("Launch at login", isOn: Binding(
+            get: { LoginItem.isOn }, set: { store.setLaunchAtLogin($0) }))
+        if LoginItem.status == .requiresApproval {
+            Button("Approve in System Settings…", action: LoginItem.openSystemSettings)
+        }
+        Toggle("Run in background", isOn: Binding(
+            get: { store.state.preferences.runInBackground },
+            set: { store.state.preferences.runInBackground = $0; controller.applyActivationPolicy() }))
+        Divider()
+        Button("Quit ScreenLayout") { NSApp.terminate(nil) }
+            .keyboardShortcut("q")
     }
 }
 
 struct ContentView: View {
     @Bindable var store: LayoutStore
+    let controller: AppController
     @State private var tab = 0
 
     var body: some View {
@@ -42,6 +93,17 @@ struct ContentView: View {
                     Button("Refresh Focus list", action: store.refreshFocusNames)
                 }
                 Toggle("Restore on display change", isOn: $store.state.preferences.autoRestoreOnDisplayChange)
+                let _ = store.loginItemTick
+                Toggle("Launch at login", isOn: Binding(
+                    get: { LoginItem.isOn }, set: { store.setLaunchAtLogin($0) }))
+                Text(LoginItem.statusText).font(.caption).foregroundStyle(.secondary)
+                if LoginItem.status == .requiresApproval {
+                    Button("Approve in System Settings…", action: LoginItem.openSystemSettings)
+                }
+                Toggle("Run in background", isOn: $store.state.preferences.runInBackground)
+                    .onChange(of: store.state.preferences.runInBackground) { _, _ in controller.applyActivationPolicy() }
+                Text("When on, closing the window hides the Dock icon and keeps ScreenLayout in the menu bar.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Divider()
                 Text("Current display set").font(.headline)
                 ForEach(store.displays) { display in
@@ -71,14 +133,16 @@ struct ContentView: View {
                 Picker("View", selection: $tab) {
                     Text("Layouts").tag(0)
                     Text("Drawers").tag(1)
+                    Text("Snap").tag(3)
                     Text("Debug events").tag(2)
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 420)
+                .frame(width: 520)
                 .padding()
                 Divider()
                 if tab == 0 { LayoutEditor(store: store) }
                 else if tab == 1 { DrawerEditor(store: store) }
+                else if tab == 3 { SnapSettings(store: store, tab: $tab) }
                 else { DebugView(store: store) }
             }
         }
@@ -214,31 +278,7 @@ struct LayoutEditor: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                HStack {
-                    Picker("Grid", selection: Binding(
-                        get: { store.grid(for: display).preset },
-                        set: { store.setGridPreset($0, for: display) })) {
-                            Text("Smart").tag("smart")
-                            Text("4 × 4").tag("4x4")
-                            Text("8 × 4").tag("8x4")
-                            Text("16 × 4").tag("16x4")
-                            Text("16 × 9").tag("16x9")
-                            Text("Custom").tag("custom")
-                        }
-                        .frame(width: 170)
-                    Stepper("Columns: \(store.grid(for: display).columns)", value: Binding(
-                        get: { store.grid(for: display).columns },
-                        set: { store.setGridDimensions(columns: $0, for: display) }), in: 2...32)
-                    Stepper("Rows: \(store.grid(for: display).rows)", value: Binding(
-                        get: { store.grid(for: display).rows },
-                        set: { store.setGridDimensions(rows: $0, for: display) }), in: 2...32)
-                    Toggle("Snap to grid", isOn: Binding(
-                        get: { store.grid(for: display).snapToGrid },
-                        set: { store.setSnapToGrid($0, for: display) }))
-                        .fixedSize()
-                    Button("Reset grid") { store.resetGrid(for: display) }
-                }
-                .font(.subheadline)
+                GridControls(store: store, display: display)
                 Text("Drag the blue app area to move it; drag its lower-right handle to resize. Grid settings are saved for this monitor.")
                     .font(.caption).foregroundStyle(.secondary)
                 if store.selectedSpace?.kind == .fullScreen {
@@ -354,6 +394,49 @@ struct DrawerEditor: View {
     }
 }
 
+// One editor for a monitor's grid, shown in Layouts and in the Snap tab. Both read the same GridSettings.
+struct GridControls: View {
+    @Bindable var store: LayoutStore
+    let display: DisplayInfo
+
+    var body: some View {
+        let geometry = store.gridGeometry(for: display)
+        HStack {
+            Picker("Grid", selection: Binding(
+                get: { store.grid(for: display).preset },
+                set: { store.setGridPreset($0, for: display) })) {
+                    Text("Smart").tag("smart")
+                    Text("4 × 4").tag("4x4")
+                    Text("8 × 4").tag("8x4")
+                    Text("16 × 4").tag("16x4")
+                    Text("16 × 9").tag("16x9")
+                    Text("Custom").tag("custom")
+                }
+                .frame(width: 170)
+            Stepper("Columns: \(geometry.columns)", value: Binding(
+                get: { geometry.columns },
+                set: { store.setGridDimensions(columns: $0, for: display) }), in: 2...32)
+            Stepper("Rows: \(geometry.rows)", value: Binding(
+                get: { geometry.rows },
+                set: { store.setGridDimensions(rows: $0, for: display) }), in: 2...32)
+            Toggle("Snap to grid", isOn: Binding(
+                get: { store.grid(for: display).snapToGrid },
+                set: { store.setSnapToGrid($0, for: display) }))
+                .fixedSize()
+            Toggle("Show 1/2 markers", isOn: Binding(
+                get: { store.grid(for: display).showHalfMarkers },
+                set: { store.setMarkers(halves: $0, for: display) }))
+                .fixedSize()
+            Toggle("Show 1/3 markers", isOn: Binding(
+                get: { store.grid(for: display).showThirdMarkers },
+                set: { store.setMarkers(thirds: $0, for: display) }))
+                .fixedSize()
+            Button("Reset grid") { store.resetGrid(for: display) }
+        }
+        .font(.subheadline)
+    }
+}
+
 struct GridCanvas: View {
     @Bindable var store: LayoutStore
     let layout: SavedLayout
@@ -369,18 +452,26 @@ struct GridCanvas: View {
             ZStack(alignment: .topLeading) {
                 RoundedRectangle(cornerRadius: 8).fill(.black.opacity(0.08))
                 Canvas { context, size in
-                    let grid = store.grid(for: display)
+                    let geometry = store.gridGeometry(for: display)
+                    let area = CGRect(origin: .zero, size: size)
                     var path = Path()
-                    for column in 0...grid.columns {
-                        let x = size.width * CGFloat(column) / CGFloat(grid.columns)
-                        path.move(to: CGPoint(x: x, y: 0)); path.addLine(to: CGPoint(x: x, y: size.height))
-                    }
-                    for row in 0...grid.rows {
-                        let y = size.height * CGFloat(row) / CGFloat(grid.rows)
-                        path.move(to: CGPoint(x: 0, y: y)); path.addLine(to: CGPoint(x: size.width, y: y))
+                    for column in 0..<geometry.columns {
+                        for row in 0..<geometry.rows {
+                            path.addRect(geometry.cellRect(column: column, row: row, in: area))
+                        }
                     }
                     context.stroke(path, with: .color(.secondary.opacity(0.2)), lineWidth: 1)
+                    let setting = store.grid(for: display)
+                    var markers = Path()
+                    for fraction in GridGeometry.markerFractions(halves: setting.showHalfMarkers, thirds: setting.showThirdMarkers) {
+                        let x = area.minX + area.width * fraction
+                        let y = area.minY + area.height * fraction
+                        markers.move(to: CGPoint(x: x, y: area.minY)); markers.addLine(to: CGPoint(x: x, y: area.maxY))
+                        markers.move(to: CGPoint(x: area.minX, y: y)); markers.addLine(to: CGPoint(x: area.maxX, y: y))
+                    }
+                    context.stroke(markers, with: .color(.accentColor.opacity(0.55)), lineWidth: 2)
                 }
+                .allowsHitTesting(false)
                 ForEach(layout.windows.filter { window in
                     guard window.displayID == display.id,
                           window.spaceID == store.selectedSpaceID else { return false }
@@ -447,14 +538,15 @@ struct WindowTile: View {
         next.x += translation.width / canvasSize.width
         next.y += translation.height / canvasSize.height
         let grid = store.grid(for: display)
+        let geometry = store.gridGeometry(for: display)
         if grid.snapToGrid {
             if abs(translation.width) > 2 {
                 next.x = snappedMoveOrigin(next.x, start: start.x, size: start.width,
-                                           divisions: grid.columns, previous: &horizontalSnapIndex)
+                                           divisions: geometry.columns, previous: &horizontalSnapIndex)
             }
             if abs(translation.height) > 2 {
                 next.y = snappedMoveOrigin(next.y, start: start.y, size: start.height,
-                                           divisions: grid.rows, previous: &verticalSnapIndex)
+                                           divisions: geometry.rows, previous: &verticalSnapIndex)
             }
         }
         next.clamp()
@@ -467,18 +559,19 @@ struct WindowTile: View {
         next.width += translation.width / canvasSize.width
         next.height += translation.height / canvasSize.height
         let grid = store.grid(for: display)
+        let geometry = store.gridGeometry(for: display)
         if grid.snapToGrid {
             if abs(translation.width) > 2 {
-                if horizontalSnapIndex == nil { horizontalSnapIndex = Int(((start.x + start.width) * Double(grid.columns)).rounded()) }
+                if horizontalSnapIndex == nil { horizontalSnapIndex = Int(((start.x + start.width) * Double(geometry.columns)).rounded()) }
                 let right = hystereticCell(next.x + next.width, previous: &horizontalSnapIndex,
-                                           divisions: grid.columns, allowed: 1...grid.columns)
-                next.width = max(1 / Double(grid.columns), Double(right) / Double(grid.columns) - next.x)
+                                           divisions: geometry.columns, allowed: 1...geometry.columns)
+                next.width = max(1 / Double(geometry.columns), Double(right) / Double(geometry.columns) - next.x)
             }
             if abs(translation.height) > 2 {
-                if verticalSnapIndex == nil { verticalSnapIndex = Int(((start.y + start.height) * Double(grid.rows)).rounded()) }
+                if verticalSnapIndex == nil { verticalSnapIndex = Int(((start.y + start.height) * Double(geometry.rows)).rounded()) }
                 let bottom = hystereticCell(next.y + next.height, previous: &verticalSnapIndex,
-                                            divisions: grid.rows, allowed: 1...grid.rows)
-                next.height = max(1 / Double(grid.rows), Double(bottom) / Double(grid.rows) - next.y)
+                                            divisions: geometry.rows, allowed: 1...geometry.rows)
+                next.height = max(1 / Double(geometry.rows), Double(bottom) / Double(geometry.rows) - next.y)
             }
         }
         next.clamp()

@@ -39,6 +39,8 @@ struct GridSettings: Codable, Equatable {
     var rows: Int
     var snapToGrid: Bool = true
     var preset: String = "smart"
+    var showHalfMarkers: Bool = true
+    var showThirdMarkers: Bool = false
 
     static func smart(for display: DisplayInfo) -> GridSettings {
         let aspect = max(0.5, display.frame.width / display.frame.height)
@@ -53,6 +55,8 @@ extension GridSettings {
         rows = try values.decode(Int.self, forKey: .rows)
         snapToGrid = try values.decodeIfPresent(Bool.self, forKey: .snapToGrid) ?? true
         preset = try values.decodeIfPresent(String.self, forKey: .preset) ?? "smart"
+        showHalfMarkers = try values.decodeIfPresent(Bool.self, forKey: .showHalfMarkers) ?? true
+        showThirdMarkers = try values.decodeIfPresent(Bool.self, forKey: .showThirdMarkers) ?? false
     }
 }
 
@@ -203,27 +207,52 @@ extension SavedLayout {
 struct Preferences: Codable {
     var focusModesEnabled = false
     var autoRestoreOnDisplayChange = false
+    var runInBackground = false
     var modes = ["Default", "Work", "Personal"]
     var selectedMode = "Default"
     var grids: [String: GridSettings] = [:]
     var drawers: [String: [String: DrawerSize]] = [:]
     var preferredLayouts: [String: UUID] = [:]
+    var snapHotkey = HotKey.defaultSnap
+    var undoHotkey = HotKey.defaultUndo
+    var snapGap = 0.0
+    var snapTarget = SnapTarget.focused
+    var recordSnaps = false
 
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case focusModesEnabled, autoRestoreOnDisplayChange, modes, selectedMode, grids, drawers, preferredLayouts
+        case focusModesEnabled, autoRestoreOnDisplayChange, runInBackground, modes, selectedMode, grids, drawers, preferredLayouts
+        case snapHotkey, undoHotkey, snapGap, snapTarget, recordSnaps
     }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         focusModesEnabled = try values.decodeIfPresent(Bool.self, forKey: .focusModesEnabled) ?? false
         autoRestoreOnDisplayChange = try values.decodeIfPresent(Bool.self, forKey: .autoRestoreOnDisplayChange) ?? false
+        runInBackground = try values.decodeIfPresent(Bool.self, forKey: .runInBackground) ?? false
         modes = try values.decodeIfPresent([String].self, forKey: .modes) ?? ["Default", "Work", "Personal"]
         selectedMode = try values.decodeIfPresent(String.self, forKey: .selectedMode) ?? "Default"
         grids = try values.decodeIfPresent([String: GridSettings].self, forKey: .grids) ?? [:]
         drawers = try values.decodeIfPresent([String: [String: DrawerSize]].self, forKey: .drawers) ?? [:]
         preferredLayouts = try values.decodeIfPresent([String: UUID].self, forKey: .preferredLayouts) ?? [:]
+        snapHotkey = try values.decodeIfPresent(HotKey.self, forKey: .snapHotkey) ?? .defaultSnap
+        undoHotkey = try values.decodeIfPresent(HotKey.self, forKey: .undoHotkey) ?? .defaultUndo
+        snapGap = try values.decodeIfPresent(Double.self, forKey: .snapGap) ?? 0
+        snapTarget = try values.decodeIfPresent(SnapTarget.self, forKey: .snapTarget) ?? .focused
+        recordSnaps = try values.decodeIfPresent(Bool.self, forKey: .recordSnaps) ?? false
+    }
+}
+
+enum SnapTarget: String, Codable, CaseIterable {
+    case focused
+    case underCursor
+
+    var title: String {
+        switch self {
+        case .focused: "Focused window"
+        case .underCursor: "Window under cursor"
+        }
     }
 }
 

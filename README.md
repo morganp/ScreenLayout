@@ -16,6 +16,10 @@ A fresh native SwiftUI macOS 27 window layout app. Frost and Rectangle are refer
 - Dragging previews locally and writes the saved layout on release. Grid snapping uses a small threshold before switching positions and includes flush right and bottom positions when the window size does not match whole grid cells.
 - Offers Smart, 4×4, 8×4, 16×4, 16×9, and custom grids. Smart chooses 16 columns and a row count from the monitor's aspect ratio. Snap to grid can be switched off. Each monitor remembers its grid settings; **Reset grid** returns that monitor to Smart with snapping on.
 - Lists Focus names found locally or entered in the app. **Focus modes…** opens a checkbox list for assigning the selected layout to any number of modes for the attached-monitor set. **Select all** then clearing one checkbox covers an all-except-one assignment. **Duplicate** creates an independent layout copy. On a Focus filter change, restores the assigned layout for the connected monitors. It can also restore the matching layout after a display change.
+- Runs from a menu bar item (status, restore selected or matching layout, open the window, Launch at login, Run in background, Quit). With **Run in background** on, closing the last window hides the Dock icon and the app keeps handling display changes, Focus changes and drawers. **Open ScreenLayout** or clicking the app again brings the window back. Automatic restores are logged in **Debug events** even with no window open.
+- **Launch at login** uses `SMAppService`; its state is read from macOS each time and shown in the menu and sidebar. A login launch starts without a window.
+- Live snapping: a global shortcut (default Control+Option+G, configurable in the **Snap** tab) shows a grid overlay on the display under the cursor. Drag across cells and the focused window (or the window under the cursor) follows live; release to snap, Escape or release outside to cancel. A second shortcut (default Control+Option+Z) undoes the last snap and pressing it again redoes it. An optional gap in points is applied to the live frame only. The overlay uses each monitor's grid from the Layouts editor, so the grid is one shared setting: change it in either place.
+- Place and record: with **Record snaps** on, a snap updates the matching window in the selected layout (no gap). **Snap window…** and **Capture focused window into selected layout** are in the menu bar item.
 - Stores layouts in `~/Library/Application Support/ScreenLayout/layouts.json`.
 
 ## Build and run
@@ -28,6 +32,10 @@ open build/ScreenLayout.app
 ```
 
 Grant ScreenLayout **Accessibility** access in System Settings when prompted. macOS requires this to read or move other apps' windows. The display log and manual grid editor work without it.
+
+## Launch at login
+
+Launch at login works best when the app is installed in `/Applications`. A login item registered from `build/` points at that path, so rebuilding or moving the app can leave a stale entry; turn the toggle off and on again, or remove the old entry in **System Settings → General → Login Items**. If macOS reports that approval is needed, use **Approve in System Settings…**.
 
 ## Connect macOS Focus
 
@@ -42,6 +50,10 @@ The build script signs the app with a stable Apple Development certificate from 
 - Multiple windows with the same app and title fall back to their window-list order, which can change between sessions.
 - The grid uses the full display bounds, including the menu bar and Dock areas; an app may constrain its window size or position.
 - The editor still describes physical displays. It does not yet save a window's Space, create or reorder Spaces, move windows between Spaces, or put other apps into full screen. See [SPACES_DESIGN.md](SPACES_DESIGN.md).
+
+## Credits
+
+Live snapping is inspired by and adapts parts of [GridSnap](https://github.com/konieczkow/gridsnap) by Maciej Gajewski (MIT): the hotkey grid overlay interaction, the non-activating overlay panel, global hotkey registration, and the undo and redo toggle. Thank you to the GridSnap project. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the license text.
 
 ## License
 
