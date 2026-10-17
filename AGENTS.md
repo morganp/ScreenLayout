@@ -2,10 +2,10 @@
 
 ## Project and repository
 
-- This repository is a fresh macOS window layout app. `ScreenLayoutApp/` is the product. The `frost/` directory is a separate, ignored reference checkout; do not treat it as the app's source.
-- Root `README.md` compares other tools. `ScreenLayoutApp/README.md` documents the product. `ScreenLayoutApp/SPACES_DESIGN.md` records the multi-Space design and constraints.
+- This repository is a fresh macOS window layout app. The repository root is the product. The `frost/` directory is a separate, ignored reference checkout; do not treat it as the app's source.
+- `README.md` documents the product. `docs/alternatives.md` compares other tools. `SPACES_DESIGN.md` records the multi-Space design and constraints.
 - Git `main` was initialized here. Annotated tag `v0.1.0` marks the first working milestone (commit `1b2635b`). Check `git status` before editing; later features may be uncommitted or on newer commits.
-- Build with `cd ScreenLayoutApp && ./build-app.sh`. The script builds, bundles, and signs `build/ScreenLayout.app` with a stable Apple Development identity. Open that bundle to run it. `.build/`, `build/`, and `frost/` are ignored.
+- Build with `./build-app.sh`. The script builds, bundles, and signs `build/ScreenLayout.app` with a stable Apple Development identity. Open that bundle to run it. `.build/`, `build/`, and `frost/` are ignored.
 - User data lives at `~/Library/Application Support/ScreenLayout/layouts.json`. Do not delete or rewrite it while testing; use temporary layouts and remove them afterward.
 
 ## Code map

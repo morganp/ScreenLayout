@@ -1,31 +1,44 @@
-# Open-source macOS layout tools
+# ScreenLayout
 
-This workspace also contains [ScreenLayoutApp](ScreenLayoutApp/README.md), a new macOS 27 window layout app built from scratch.
+A fresh native SwiftUI macOS 27 window layout app. Frost and Rectangle are reference projects only; this app has its own source and package. See [docs/alternatives.md](docs/alternatives.md) for a comparison with other tools.
 
-This comparison separates **app window layouts** (which app window goes where) from **display arrangements** (monitor position and resolution) and **menu bar icon layouts**. These are different tasks, even when a tool calls all of them a “layout.” Features below are based on the linked project documentation, checked 16 October 2026.
+## Current features
 
-| Tool | Manages | Detects display changes | Saves app window layouts | Restores automatically | Multiple named layouts | Notes |
-| --- | --- | --- | --- | --- | --- | --- |
-| [SnapBack](https://github.com/jamesagarside/snapback) | App windows | Yes: dock, undock, wake | Yes, per display setup | Yes; automatic, prompt, or disabled | Yes, per display setup | Hammerspoon extension; also offers window snapping. Spaces restoration is best effort. |
-| [Realign](https://github.com/hunterphillips/realign) | App windows | Yes: connect and disconnect | Yes, one per display setup | Optional; off by default | No | Native menu bar app with save and restore shortcuts. Requires macOS 14+. |
-| [Monitor Glue](https://github.com/erango/monitor-glue) | App windows | Yes: reconnect, wake, unlock | Remembers positions per monitor | Yes | No named profiles documented | Continuously remembers where windows were on each monitor; requires macOS 14+. |
-| [Tsubame](https://github.com/zembutsu/tsubame) | App windows | Yes: reconnect and wake | Yes, including five manual snapshot slots | Yes | Five numbered slots | Also moves windows between displays and offers keyboard nudging. Full-screen and minimized windows are excluded from manual snapshots. |
-| [Rectangle](https://github.com/rxhanson/Rectangle) | App window snapping and tiling | Reacts to the current display for window commands; no display-change layout trigger documented | No saved multi-app workspaces | No | No | Free and open source; install with `brew install --cask rectangle`. Saved workspaces and display-connect triggers are features of the separate paid [Rectangle Pro](https://rectangleapp.com/pro/). |
-| [GridSnap](https://github.com/konieczkow/gridsnap) | App window snapping to a grid | No display-change trigger documented | No saved multi-app workspaces; saves grid regions as presets | No | Presets, each with its own global shortcut | Menu bar Divvy alternative: shortcut shows a grid, select cells, window snaps. Undo and redo, configurable gap, works across displays. MIT, macOS 14+, `brew install --cask konieczkow/tap/gridsnap`. Full-screen windows not supported. |
-| [Hammerspoon](https://www.hammerspoon.org/) | App windows, via Lua configuration | Yes, with [`hs.screen.watcher`](https://www.hammerspoon.org/docs/hs.screen.watcher.html) | Possible with custom configuration | Possible with custom configuration | Possible with custom configuration | [`hs.window.layout`](https://www.hammerspoon.org/docs/hs.window.layout.html) supports rules tied to a screen configuration. It is a toolkit rather than a ready-made layout saver. |
-| [winlayout](https://github.com/Clustmart/winlayout) | App windows | No built-in background watcher documented | Yes, via command line | No built-in automatic restore | Yes, named saves | Simple script for manual save and restore. Saved coordinates depend on the display arrangement, so save again when it changes. |
-| [displayplacer](https://github.com/jakehilborn/displayplacer) | Monitor resolution, orientation, and arrangement | No built-in automatic profile switch documented | No | No built-in automatic restore | Display configurations can be saved as commands | Use alongside a window tool if you need to restore monitor settings as well as app windows. |
-| [Frost](https://github.com/frostbar/frost/) | Menu bar icons | Supports multiple displays | No | Keeps menu bar icon sections on supported macOS versions | No app window profiles | Its Layout editor arranges menu bar icons, not app windows. Requires macOS 26 or 27. |
+- Detects display configuration events with Core Graphics, including plug and unplug notifications.
+- Reads the current normal desktop Space count per display and compares it with the number of desktop Space slots in the saved layout. This read-only count uses an undocumented SkyLight API.
+- Restores desktop Space slots to existing macOS desktop Spaces in order, moving matched windows and verifying each Space assignment. It does not create Spaces. The move operation uses an undocumented SkyLight API and may vary by macOS version. Full-screen slots cannot be applied yet.
+- Shows attached displays, stable display UUIDs, geometry, and a live event log in **Debug events**.
+- Saves layouts by the exact set of attached displays. A layout can be assigned to several macOS Focus modes.
+- Captures the current windows into a saved layout, or adds a running app manually.
+- Creates blank layouts or captures the current screen as a new layout. Edits and renames save automatically; **Save as copy** makes an independent layout, and **Delete layout** asks for confirmation.
+- Edits one selected window area at a time on a monitor grid. **Show all apps** reveals every placement when needed. Drag the blue area to move it or its corner handle to resize it. Placements can overlap.
+- A saved window can rest in one of eight edge or corner drawers. The **Drawers** tab sets the visible resting width and height for each position on each monitor. The window's grid rectangle in **Layouts** sets its active size and position. When the window gains focus it expands to that rectangle, then returns to its drawer when focus moves elsewhere. Drawer monitoring starts when the layout is restored and uses Accessibility window controls.
+- Dragging previews locally and writes the saved layout on release. Grid snapping uses a small threshold before switching positions and includes flush right and bottom positions when the window size does not match whole grid cells.
+- Offers Smart, 4×4, 8×4, 16×4, 16×9, and custom grids. Smart chooses 16 columns and a row count from the monitor's aspect ratio. Snap to grid can be switched off. Each monitor remembers its grid settings; **Reset grid** returns that monitor to Smart with snapping on.
+- Lists Focus names found locally or entered in the app. **Focus modes…** opens a checkbox list for assigning the selected layout to any number of modes for the attached-monitor set. **Select all** then clearing one checkbox covers an all-except-one assignment. **Duplicate** creates an independent layout copy. On a Focus filter change, restores the assigned layout for the connected monitors. It can also restore the matching layout after a display change.
+- Stores layouts in `~/Library/Application Support/ScreenLayout/layouts.json`.
 
-## Which to try
+## Build and run
 
-- **Several workspaces for each monitor setup:** [SnapBack](https://github.com/jamesagarside/snapback).
-- **One simple saved workspace per setup:** [Realign](https://github.com/hunterphillips/realign).
-- **Put windows back on the same monitor without managing profiles:** [Monitor Glue](https://github.com/erango/monitor-glue).
-- **Custom rules or automation:** [Hammerspoon](https://www.hammerspoon.org/).
-- **Manual window snapping with an open-source app:** [Rectangle](https://github.com/rxhanson/Rectangle).
-- **Divvy-style grid selection for snapping:** [GridSnap](https://github.com/konieczkow/gridsnap).
-- **Restore monitor resolution and physical arrangement too:** add [displayplacer](https://github.com/jakehilborn/displayplacer).
-- **Organize menu bar icons:** [Frost](https://github.com/frostbar/frost/).
+Requires Xcode 27 on macOS 27.
 
-Most app window tools need macOS Accessibility permission to move other apps' windows. Restore results can vary for windows that an app or macOS does not allow the Accessibility API to control. The feature comparison reflects project documentation, not hands-on testing on this Mac.
+```sh
+./build-app.sh
+open build/ScreenLayout.app
+```
+
+Grant ScreenLayout **Accessibility** access in System Settings when prompted. macOS requires this to read or move other apps' windows. The display log and manual grid editor work without it.
+
+## Connect macOS Focus
+
+Turn on **Use macOS Focus filters** in ScreenLayout. If the Mac permits reading its local Focus settings, the Focus names appear automatically. If macOS blocks that file, enter the names with **Add Focus name**. For each macOS Focus you want to automate, open **System Settings → Focus → [Focus name] → Add Filter → ScreenLayout** and enter that Focus name in **Layout profile**. With each monitor combination attached, select a saved layout, click **Focus modes…**, and check the modes that should use it. The app applies that assignment when the Focus filter selects the mode, using the current set of monitors. A Focus without a ScreenLayout filter uses the `Default` assignment. Keep ScreenLayout running to respond to Focus changes.
+
+The build script signs the app with a stable Apple Development certificate from your keychain, or the identity in `SCREENLAYOUT_SIGNING_IDENTITY`. Rebuilding with ad hoc signatures changes the app's identity and can leave macOS showing an enabled permission while `AXIsProcessTrusted()` still returns false. If this happens after changing signing identity, switch only ScreenLayout's **Device Control and Data Access** entry off and on again in System Settings, then return to the app and click **Check Accessibility access**.
+
+## Limits in this first version
+
+- macOS does not expose the active Focus name or configured Focus list through a public API. ScreenLayout tries to read the list from macOS's local Focus configuration file, which is an undocumented format and may be blocked by macOS privacy controls. On this development Mac, ScreenLayout is blocked from that file, so names must be added in the app. Each Focus still needs its own ScreenLayout Focus filter to signal activation. ScreenLayout checks the filter while running; it does not currently launch itself when a Focus changes.
+- A saved placement targets an already-running app window. The app does not launch missing apps or restore closed windows.
+- Multiple windows with the same app and title fall back to their window-list order, which can change between sessions.
+- The grid uses the full display bounds, including the menu bar and Dock areas; an app may constrain its window size or position.
+- The editor still describes physical displays. It does not yet save a window's Space, create or reorder Spaces, move windows between Spaces, or put other apps into full screen. See [SPACES_DESIGN.md](SPACES_DESIGN.md).
