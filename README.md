@@ -42,3 +42,7 @@ The build script signs the app with a stable Apple Development certificate from 
 - Multiple windows with the same app and title fall back to their window-list order, which can change between sessions.
 - The grid uses the full display bounds, including the menu bar and Dock areas; an app may constrain its window size or position.
 - The editor still describes physical displays. It does not yet save a window's Space, create or reorder Spaces, move windows between Spaces, or put other apps into full screen. See [SPACES_DESIGN.md](SPACES_DESIGN.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
