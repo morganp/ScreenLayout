@@ -35,14 +35,24 @@ import SpaceBridge
     private var drawerTask: Task<Void, Never>?
     private var activeDrawerLayoutID: UUID?
     private let fileURL: URL
+    private var didLoadState = false
 
     init() {
-        let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("ScreenLayout", isDirectory: true)
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let directory = base.appendingPathComponent("ScreenLayout", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         fileURL = directory.appendingPathComponent("layouts.json")
-        if let data = try? Data(contentsOf: fileURL), let loaded = try? JSONDecoder().decode(StoredState.self, from: data) {
-            state = loaded
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            do {
+                let data = try Data(contentsOf: fileURL)
+                state = try JSONDecoder().decode(StoredState.self, from: data)
+                didLoadState = true
+            } catch {
+                preserveUnreadableFile(error)
+            }
+        } else {
+            didLoadState = true
         }
         migrateLegacyAssignments()
         migrateLegacySpaces()
@@ -57,9 +67,27 @@ import SpaceBridge
         updateFocusMonitoring()
     }
 
+    deinit {
+        let pointer = Unmanaged.passUnretained(self).toOpaque()
+        CGDisplayRemoveReconfigurationCallback(displayCallback, pointer)
+    }
+
+    private func preserveUnreadableFile(_ error: Error) {
+        let stamp = ISO8601DateFormatter().string(from: .now).replacingOccurrences(of: ":", with: "-")
+        let backup = fileURL.deletingLastPathComponent().appendingPathComponent("layouts.corrupt-\(stamp).json")
+        do {
+            try FileManager.default.copyItem(at: fileURL, to: backup)
+            status = "Could not read saved layouts; copied to \(backup.lastPathComponent). Saving is disabled."
+        } catch {
+            status = "Could not read saved layouts and could not back them up. Saving is disabled."
+        }
+        log("\(status) (\(error.localizedDescription))")
+    }
+
     var displaySet: String { displays.map(\.id).sorted().joined(separator: "+") }
     var currentMode: String { state.preferences.focusModesEnabled ? state.preferences.selectedMode : "Default" }
     var relevantLayouts: [SavedLayout] { state.layouts.filter { $0.displaySet == displaySet } }
+    private var selectedLayoutIndex: Int? { state.layouts.firstIndex(where: { $0.id == selectedLayoutID }) }
     var selectedLayout: SavedLayout? { state.layouts.first { $0.id == selectedLayoutID } }
     var selectableFocusNames: [String] {
         let names = ["Default"] + focusNames + state.preferences.modes + [state.preferences.selectedMode]
@@ -84,10 +112,14 @@ import SpaceBridge
         }
     }
 
+    private static func defaultSlot(for displayID: String) -> SpaceSlot {
+        SpaceSlot(displayID: displayID, name: "Desktop 1")
+    }
+
     private func migrateLegacySpaces() {
         for layoutIndex in state.layouts.indices where state.layouts[layoutIndex].spaces == nil {
             let displayIDs = Array(Set(state.layouts[layoutIndex].windows.map(\.displayID))).sorted()
-            let slots = displayIDs.map { SpaceSlot(displayID: $0, name: "Desktop 1") }
+            let slots = displayIDs.map { Self.defaultSlot(for: $0) }
             state.layouts[layoutIndex].spaces = slots
             for windowIndex in state.layouts[layoutIndex].windows.indices {
                 let displayID = state.layouts[layoutIndex].windows[windowIndex].displayID
@@ -115,18 +147,24 @@ import SpaceBridge
     }
 
     var selectedSpace: SpaceSlot? { selectedLayout?.spaces?.first { $0.id == selectedSpaceID } }
-    var canRemoveSelectedSpace: Bool {
-        guard let slot = selectedSpace, let spaces = selectedLayout?.spaces else { return false }
-        let others = spaces.filter { $0.displayID == slot.displayID && $0.id != slot.id }
-        return !others.isEmpty && (slot.kind != .desktop || others.contains { $0.kind == .desktop })
+    var canRemoveSelectedSpace: Bool { removalPlan() != nil }
+
+    private func removalPlan() -> (layoutIndex: Int, slots: [SpaceSlot], selected: SpaceSlot, destination: SpaceSlot)? {
+        guard let layoutIndex = selectedLayoutIndex,
+              let slots = state.layouts[layoutIndex].spaces,
+              let selected = slots.first(where: { $0.id == selectedSpaceID }) else { return nil }
+        let others = slots.filter { $0.displayID == selected.displayID && $0.id != selected.id }
+        if selected.kind == .desktop && !others.contains(where: { $0.kind == .desktop }) { return nil }
+        guard let destination = others.first(where: { $0.kind == .desktop }) ?? others.first else { return nil }
+        return (layoutIndex, slots, selected, destination)
     }
 
     func ensureSelectedSpace() {
-        guard let layoutIndex = state.layouts.firstIndex(where: { $0.id == selectedLayoutID }),
+        guard let layoutIndex = selectedLayoutIndex,
               let displayID = selectedDisplayID else { selectedSpaceID = nil; return }
         if !(state.layouts[layoutIndex].spaces ?? []).contains(where: { $0.displayID == displayID }) {
             var slots = state.layouts[layoutIndex].spaces ?? []
-            slots.append(SpaceSlot(displayID: displayID, name: "Desktop 1"))
+            slots.append(Self.defaultSlot(for: displayID))
             state.layouts[layoutIndex].spaces = slots
         }
         let slots = state.layouts[layoutIndex].spaces ?? []
@@ -136,7 +174,7 @@ import SpaceBridge
     }
 
     func addSpace(kind: SpaceKind) {
-        guard let layoutIndex = state.layouts.firstIndex(where: { $0.id == selectedLayoutID }),
+        guard let layoutIndex = selectedLayoutIndex,
               let displayID = selectedDisplayID else { return }
         var slots = state.layouts[layoutIndex].spaces ?? []
         let number = slots.filter { $0.displayID == displayID && $0.kind == kind }.count + 1
@@ -149,7 +187,7 @@ import SpaceBridge
     }
 
     func moveSelectedSpace(_ offset: Int) {
-        guard let layoutIndex = state.layouts.firstIndex(where: { $0.id == selectedLayoutID }),
+        guard let layoutIndex = selectedLayoutIndex,
               var slots = state.layouts[layoutIndex].spaces,
               let source = slots.firstIndex(where: { $0.id == selectedSpaceID }) else { return }
         let indices = slots.indices.filter { slots[$0].displayID == slots[source].displayID }
@@ -159,12 +197,9 @@ import SpaceBridge
     }
 
     func removeSelectedSpace() {
-        guard let layoutIndex = state.layouts.firstIndex(where: { $0.id == selectedLayoutID }),
-              var slots = state.layouts[layoutIndex].spaces,
-              let selected = slots.first(where: { $0.id == selectedSpaceID }) else { return }
-        let sameDisplay = slots.filter { $0.displayID == selected.displayID && $0.id != selected.id }
-        if selected.kind == .desktop && !sameDisplay.contains(where: { $0.kind == .desktop }) { return }
-        guard let destination = sameDisplay.first(where: { $0.kind == .desktop }) ?? sameDisplay.first else { return }
+        guard let plan = removalPlan() else { return }
+        let (layoutIndex, selected, destination) = (plan.layoutIndex, plan.selected, plan.destination)
+        var slots = plan.slots
         for index in state.layouts[layoutIndex].windows.indices where state.layouts[layoutIndex].windows[index].spaceID == selected.id {
             state.layouts[layoutIndex].windows[index].spaceID = destination.id
         }
@@ -175,7 +210,7 @@ import SpaceBridge
     }
 
     func moveWindowToSpace(_ windowID: UUID, spaceID: UUID) {
-        guard let layoutIndex = state.layouts.firstIndex(where: { $0.id == selectedLayoutID }),
+        guard let layoutIndex = selectedLayoutIndex,
               let slot = state.layouts[layoutIndex].spaces?.first(where: { $0.id == spaceID }),
               let windowIndex = state.layouts[layoutIndex].windows.firstIndex(where: { $0.id == windowID }) else { return }
         state.layouts[layoutIndex].windows[windowIndex].spaceID = spaceID
@@ -295,7 +330,7 @@ import SpaceBridge
         accessibilityTrusted = WindowAccess.trusted
         guard accessibilityTrusted else { WindowAccess.requestPermission(); status = "Accessibility is not trusted for this build"; log(status); return }
         var windows = WindowAccess.capture(displays: displays)
-        let slots = displays.map { SpaceSlot(displayID: $0.id, name: "Desktop 1") }
+        let slots = displays.map { Self.defaultSlot(for: $0.id) }
         for index in windows.indices {
             windows[index].spaceID = slots.first(where: { $0.displayID == windows[index].displayID })?.id
         }
@@ -311,7 +346,7 @@ import SpaceBridge
     }
 
     func createBlankLayout() {
-        let slots = displays.map { SpaceSlot(displayID: $0.id, name: "Desktop 1") }
+        let slots = displays.map { Self.defaultSlot(for: $0.id) }
         let layout = SavedLayout(name: "New layout", displaySet: displaySet, mode: currentMode,
                                  windows: [], spaces: slots)
         state.layouts.append(layout)
@@ -323,7 +358,7 @@ import SpaceBridge
     }
 
     func renameSelectedLayout(_ name: String) {
-        guard let index = state.layouts.firstIndex(where: { $0.id == selectedLayoutID }) else { return }
+        guard let index = selectedLayoutIndex else { return }
         state.layouts[index].name = name
         state.layouts[index].savedAt = .now
     }
@@ -339,10 +374,6 @@ import SpaceBridge
     }
 
     private func restore(_ layout: SavedLayout) {
-        drawerTask?.cancel()
-        drawerTask = nil
-        activeDrawers = []
-        activeDrawerLayoutID = nil
         let slotsByDisplay = Dictionary(grouping: layout.spaces ?? [], by: \.displayID)
         if slotsByDisplay.values.contains(where: { $0.contains(where: { $0.kind == .fullScreen }) }) {
             status = "Full-screen Space slots cannot be applied yet"
@@ -383,6 +414,10 @@ import SpaceBridge
             log(status)
             return
         }
+        drawerTask?.cancel()
+        drawerTask = nil
+        activeDrawers = []
+        activeDrawerLayoutID = nil
         if multiSpace {
             let result = WindowAccess.restoreAcrossSpaces(restingPlacements, displays: displays, targetSpaces: targets)
             status = "Restored \(result.moved) windows; skipped \(result.skipped); Space moves failed \(result.spaceFailed)"
@@ -395,7 +430,7 @@ import SpaceBridge
     }
 
     func setDrawer(_ edge: DrawerEdge?, for windowID: UUID) {
-        guard let layoutIndex = state.layouts.firstIndex(where: { $0.id == selectedLayoutID }),
+        guard let layoutIndex = selectedLayoutIndex,
               let windowIndex = state.layouts[layoutIndex].windows.firstIndex(where: { $0.id == windowID }) else { return }
         // The window keeps its existing rect: it becomes the drawer's active frame.
         state.layouts[layoutIndex].windows[windowIndex].drawer = edge
@@ -403,10 +438,12 @@ import SpaceBridge
     }
 
     private func startDrawers(for layout: SavedLayout) {
+        var claimed: Set<UInt32> = []
         for placement in layout.windows {
-            guard let edge = placement.drawer,
-                  displays.contains(where: { $0.id == placement.displayID }) else { continue }
-            let windowID = WindowAccess.windowID(for: placement)
+            guard displays.contains(where: { $0.id == placement.displayID }) else { continue }
+            let windowID = WindowAccess.windowID(for: placement, claimed: claimed)
+            if windowID != 0 { claimed.insert(windowID) }
+            guard let edge = placement.drawer else { continue }
             guard windowID != 0 else { log("Drawer window unavailable: \(placement.appName)"); continue }
             guard let display = displays.first(where: { $0.id == placement.displayID }),
                   WindowAccess.setDrawerFrame(edge: edge, expanded: false, display: display.visibleFrame,
@@ -425,7 +462,8 @@ import SpaceBridge
         log("Started \(activeDrawers.count) edge drawer(s)")
         drawerTask = Task { [weak self] in
             while !Task.isCancelled {
-                self?.updateDrawers()
+                guard let self else { return }
+                updateDrawers()
                 try? await Task.sleep(for: .milliseconds(180))
             }
         }
@@ -449,7 +487,7 @@ import SpaceBridge
     }
 
     func updateRect(windowID: UUID, rect: UnitRect) {
-        guard let layoutIndex = state.layouts.firstIndex(where: { $0.id == selectedLayoutID }),
+        guard let layoutIndex = selectedLayoutIndex,
               let windowIndex = state.layouts[layoutIndex].windows.firstIndex(where: { $0.id == windowID }) else { return }
         var adjusted = rect
         adjusted.clamp()
@@ -514,7 +552,7 @@ import SpaceBridge
             createBlankLayout()
         }
         ensureSelectedSpace()
-        guard let index = state.layouts.firstIndex(where: { $0.id == selectedLayoutID }) else { return }
+        guard let index = selectedLayoutIndex else { return }
         let count = state.layouts[index].windows.filter { $0.bundleID == app.id }.count
         var placement = WindowPlacement(bundleID: app.id, appName: app.name, title: "", ordinal: count,
                                         displayID: displayID,
@@ -526,7 +564,7 @@ import SpaceBridge
     }
 
     func moveWindow(_ id: UUID, to displayID: String) {
-        guard let layoutIndex = state.layouts.firstIndex(where: { $0.id == selectedLayoutID }),
+        guard let layoutIndex = selectedLayoutIndex,
               let windowIndex = state.layouts[layoutIndex].windows.firstIndex(where: { $0.id == id }) else { return }
         state.layouts[layoutIndex].windows[windowIndex].displayID = displayID
         if let slot = state.layouts[layoutIndex].spaces?.first(where: { $0.displayID == displayID }) {
@@ -597,18 +635,19 @@ import SpaceBridge
         guard state.preferences.focusModesEnabled else { modeChanged(); return }
         focusTask = Task { [weak self] in
             while !Task.isCancelled {
+                guard let self else { return }
                 do {
                     let filter = try await LayoutFocusFilter.current
-                    self?.lastFocusError = nil
-                    self?.applyFocusProfile(filter.profile)
+                    lastFocusError = nil
+                    applyFocusProfile(filter.profile)
                 } catch SetFocusFilterIntentError.notFound {
-                    self?.lastFocusError = nil
-                    self?.applyFocusProfile(nil)
+                    lastFocusError = nil
+                    applyFocusProfile(nil)
                 } catch {
                     let message = error.localizedDescription
-                    if self?.lastFocusError != message {
-                        self?.lastFocusError = message
-                        self?.log("Focus filter check failed: \(message)")
+                    if lastFocusError != message {
+                        lastFocusError = message
+                        log("Focus filter check failed: \(message)")
                     }
                 }
                 try? await Task.sleep(for: .seconds(2))
@@ -635,6 +674,7 @@ import SpaceBridge
     }
 
     private func persist() {
+        guard didLoadState else { return }
         guard let data = try? JSONEncoder().encode(state) else { status = "Could not encode layouts"; return }
         do { try data.write(to: fileURL, options: .atomic) }
         catch { status = "Could not save layouts: \(error.localizedDescription)"; log(status) }

@@ -46,6 +46,16 @@ struct GridSettings: Codable, Equatable {
     }
 }
 
+extension GridSettings {
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        columns = try values.decode(Int.self, forKey: .columns)
+        rows = try values.decode(Int.self, forKey: .rows)
+        snapToGrid = try values.decodeIfPresent(Bool.self, forKey: .snapToGrid) ?? true
+        preset = try values.decodeIfPresent(String.self, forKey: .preset) ?? "smart"
+    }
+}
+
 struct DisplayInfo: Identifiable, Hashable {
     let id: String
     let name: String
@@ -78,6 +88,21 @@ struct WindowPlacement: Codable, Identifiable, Hashable {
     var rect: UnitRect
     var spaceID: UUID? = nil
     var drawer: DrawerEdge? = nil
+}
+
+extension WindowPlacement {
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        bundleID = try values.decode(String.self, forKey: .bundleID)
+        appName = try values.decode(String.self, forKey: .appName)
+        title = try values.decode(String.self, forKey: .title)
+        ordinal = try values.decode(Int.self, forKey: .ordinal)
+        displayID = try values.decode(String.self, forKey: .displayID)
+        rect = try values.decode(UnitRect.self, forKey: .rect)
+        spaceID = try values.decodeIfPresent(UUID.self, forKey: .spaceID)
+        drawer = try values.decodeIfPresent(DrawerEdge.self, forKey: .drawer)
+    }
 }
 
 enum DrawerEdge: String, Codable, CaseIterable {
@@ -142,6 +167,16 @@ struct SpaceSlot: Codable, Identifiable, Hashable {
     var kind: SpaceKind = .desktop
 }
 
+extension SpaceSlot {
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        displayID = try values.decode(String.self, forKey: .displayID)
+        name = try values.decode(String.self, forKey: .name)
+        kind = try values.decodeIfPresent(SpaceKind.self, forKey: .kind) ?? .desktop
+    }
+}
+
 struct SavedLayout: Codable, Identifiable {
     var id: UUID = UUID()
     var name: String
@@ -150,6 +185,19 @@ struct SavedLayout: Codable, Identifiable {
     var savedAt: Date = .now
     var windows: [WindowPlacement]
     var spaces: [SpaceSlot]? = nil
+}
+
+extension SavedLayout {
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try values.decode(String.self, forKey: .name)
+        displaySet = try values.decode(String.self, forKey: .displaySet)
+        mode = try values.decode(String.self, forKey: .mode)
+        savedAt = try values.decodeIfPresent(Date.self, forKey: .savedAt) ?? .now
+        windows = try values.decode([WindowPlacement].self, forKey: .windows)
+        spaces = try values.decodeIfPresent([SpaceSlot].self, forKey: .spaces)
+    }
 }
 
 struct Preferences: Codable {
