@@ -397,21 +397,8 @@ import SpaceBridge
     func setDrawer(_ edge: DrawerEdge?, for windowID: UUID) {
         guard let layoutIndex = state.layouts.firstIndex(where: { $0.id == selectedLayoutID }),
               let windowIndex = state.layouts[layoutIndex].windows.firstIndex(where: { $0.id == windowID }) else { return }
-        let previous = state.layouts[layoutIndex].windows[windowIndex].drawer
+        // The window keeps its existing rect: it becomes the drawer's active frame.
         state.layouts[layoutIndex].windows[windowIndex].drawer = edge
-        if previous == nil, let edge {
-            let size: DrawerSize
-            switch edge {
-            case .left, .right: size = DrawerSize(width: 0.5, height: 1)
-            case .top, .bottom: size = DrawerSize(width: 1, height: 0.5)
-            default: size = DrawerSize(width: 0.5, height: 0.5)
-            }
-            let displayID = state.layouts[layoutIndex].windows[windowIndex].displayID
-            if let display = displays.first(where: { $0.id == displayID }) {
-                state.layouts[layoutIndex].windows[windowIndex].rect = UnitRect(edge.frame(in: display.visibleFrame, size: size),
-                                                                              in: display.visibleFrame)
-            }
-        }
         state.layouts[layoutIndex].savedAt = .now
     }
 
