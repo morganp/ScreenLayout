@@ -17,6 +17,17 @@
 - [ ] Verify at runtime: hotkeys, overlay on each display and in full-screen Spaces, live preview, undo, recording against a disposable layout.
 - [ ] Per-placement shortcuts to snap a window to a saved grid rectangle.
 
+## Drawers
+
+- [x] Drawer depth set on the shared grid (snap, markers, cells and percent readout).
+- [x] Per-monitor corner rule (separate, top and bottom, left and right) with one shared rect function (`DrawerGeometry.rects`).
+- [x] Configurable drawer count per edge (1 to 8) with slots, grid snapping and capping, slot picker in Layouts.
+- [x] Count 0 disables an edge, corner on/off (default off, migrated), every enabled drawer reserves space at its effective depth, Drawers canvas draws all enabled strips with dashed outlines for off positions.
+- [ ] Verify at runtime: disabled positions (picker label, runtime fallback and log, enabling by clicking an outline, corner migration on the real data).
+- [ ] Verify at runtime: multiple slots per edge (focus expand and collapse, shared slot, count reduced with drawers running, snapping on and off).
+- [ ] Verify at runtime: each position under each corner rule, focus expand and collapse, corner remap log, rule change with drawers running.
+- [ ] Per-drawer along-edge extent (edge strips are centered, full length by default).
+
 ## Deferred review items
 
 - [ ] Debounced persist (the store writes layouts.json on every state change).

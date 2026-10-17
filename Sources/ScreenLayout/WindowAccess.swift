@@ -147,11 +147,11 @@ enum WindowAccess {
     }
 
     static func setDrawerFrame(edge: DrawerEdge, expanded: Bool, display: CGRect,
-                               collapsedSize: DrawerSize, expandedRect: UnitRect,
+                               restingFrame: CGRect, expandedRect: UnitRect,
                                windowID: UInt32, bundleID: String) -> Bool {
         guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }),
               let window = windows(for: app).first(where: { SLWindowIDForAXElement($0) == windowID }) else { return false }
-        let frame = expanded ? expandedRect.frame(in: display) : edge.frame(in: display, size: collapsedSize)
+        let frame = expanded ? expandedRect.frame(in: display) : restingFrame
         guard setSize(window, frame.size) else { return false }
         let actualSize = self.size(window, kAXSizeAttribute) ?? frame.size
         let x: CGFloat
@@ -159,14 +159,14 @@ enum WindowAccess {
             x = min(display.maxX - actualSize.width, max(display.minX, frame.minX))
         } else {
             x = edge.isLeft ? display.minX - max(0, actualSize.width - frame.width)
-                : (edge.isRight ? display.maxX - frame.width : display.midX - actualSize.width / 2)
+                : (edge.isRight ? display.maxX - frame.width : frame.midX - actualSize.width / 2)
         }
         let y: CGFloat
         if expanded {
             y = min(display.maxY - actualSize.height, max(display.minY, frame.minY))
         } else {
             y = edge.isTop ? display.minY - max(0, actualSize.height - frame.height)
-                : (edge.isBottom ? display.maxY - frame.height : display.midY - actualSize.height / 2)
+                : (edge.isBottom ? display.maxY - frame.height : frame.midY - actualSize.height / 2)
         }
         return setPosition(window, CGPoint(x: x, y: y))
     }

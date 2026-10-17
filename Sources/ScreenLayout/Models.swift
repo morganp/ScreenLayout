@@ -92,6 +92,7 @@ struct WindowPlacement: Codable, Identifiable, Hashable {
     var rect: UnitRect
     var spaceID: UUID? = nil
     var drawer: DrawerEdge? = nil
+    var drawerSlot = 0
 }
 
 extension WindowPlacement {
@@ -106,6 +107,7 @@ extension WindowPlacement {
         rect = try values.decode(UnitRect.self, forKey: .rect)
         spaceID = try values.decodeIfPresent(UUID.self, forKey: .spaceID)
         drawer = try values.decodeIfPresent(DrawerEdge.self, forKey: .drawer)
+        drawerSlot = try values.decodeIfPresent(Int.self, forKey: .drawerSlot) ?? 0
     }
 }
 
@@ -212,6 +214,8 @@ struct Preferences: Codable {
     var selectedMode = "Default"
     var grids: [String: GridSettings] = [:]
     var drawers: [String: [String: DrawerSize]] = [:]
+    var cornerRules: [String: CornerRule] = [:]
+    var drawerCounts: [String: [String: Int]] = [:]
     var preferredLayouts: [String: UUID] = [:]
     var snapHotkey = HotKey.defaultSnap
     var undoHotkey = HotKey.defaultUndo
@@ -222,7 +226,7 @@ struct Preferences: Codable {
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case focusModesEnabled, autoRestoreOnDisplayChange, runInBackground, modes, selectedMode, grids, drawers, preferredLayouts
+        case focusModesEnabled, autoRestoreOnDisplayChange, runInBackground, modes, selectedMode, grids, drawers, cornerRules, drawerCounts, preferredLayouts
         case snapHotkey, undoHotkey, snapGap, snapTarget, recordSnaps
     }
 
@@ -235,6 +239,8 @@ struct Preferences: Codable {
         selectedMode = try values.decodeIfPresent(String.self, forKey: .selectedMode) ?? "Default"
         grids = try values.decodeIfPresent([String: GridSettings].self, forKey: .grids) ?? [:]
         drawers = try values.decodeIfPresent([String: [String: DrawerSize]].self, forKey: .drawers) ?? [:]
+        cornerRules = try values.decodeIfPresent([String: CornerRule].self, forKey: .cornerRules) ?? [:]
+        drawerCounts = try values.decodeIfPresent([String: [String: Int]].self, forKey: .drawerCounts) ?? [:]
         preferredLayouts = try values.decodeIfPresent([String: UUID].self, forKey: .preferredLayouts) ?? [:]
         snapHotkey = try values.decodeIfPresent(HotKey.self, forKey: .snapHotkey) ?? .defaultSnap
         undoHotkey = try values.decodeIfPresent(HotKey.self, forKey: .undoHotkey) ?? .defaultUndo

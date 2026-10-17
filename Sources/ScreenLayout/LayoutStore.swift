@@ -32,12 +32,15 @@ import SpaceBridge
         let bundleID: String
         let displayID: String
         let edge: DrawerEdge
+        let slot: Int
         var expandedRect: UnitRect
         var expanded = false
     }
     private var activeDrawers: [ActiveDrawer] = []
     private var drawerTask: Task<Void, Never>?
     private var activeDrawerLayoutID: UUID?
+    private var loggedCornerRemaps: Set<String> = []
+    private var loggedSlotClamps: Set<String> = []
     private let fileURL: URL
     private var didLoadState = false
 
@@ -61,6 +64,7 @@ import SpaceBridge
         migrateLegacyAssignments()
         migrateLegacySpaces()
         migrateLegacyDrawers()
+        migrateCornerDrawers()
         refreshDisplays(reason: "Startup")
         refreshFocusNames()
         log("Accessibility trusted: \(accessibilityTrusted)")
@@ -142,6 +146,27 @@ import SpaceBridge
                       placement.rect.height > 0.95 else { continue }
                 state.layouts[layoutIndex].windows[windowIndex].rect =
                     UnitRect(x: edge == .left ? 0 : 0.5, y: 0, width: 0.5, height: 1)
+            }
+        }
+    }
+
+    // Corner drawers now default to off. A corner stays on where the monitor saved a size for it or a
+    // layout window uses it. An explicit stored count, including 0, is never overwritten.
+    private func migrateCornerDrawers() {
+        var wanted: [String: Set<DrawerEdge>] = [:]
+        for (displayID, sizes) in state.preferences.drawers {
+            for key in sizes.keys {
+                if let edge = DrawerEdge(rawValue: key), edge.isCorner { wanted[displayID, default: []].insert(edge) }
+            }
+        }
+        for layout in state.layouts {
+            for placement in layout.windows {
+                if let edge = placement.drawer, edge.isCorner { wanted[placement.displayID, default: []].insert(edge) }
+            }
+        }
+        for (displayID, corners) in wanted {
+            for corner in corners where state.preferences.drawerCounts[displayID]?[corner.rawValue] == nil {
+                state.preferences.drawerCounts[displayID, default: [:]][corner.rawValue] = 1
             }
         }
     }
@@ -324,24 +349,143 @@ import SpaceBridge
         state.preferences.drawers[display.id]?[edge.rawValue] ?? .standard(for: edge)
     }
 
+    func cornerRule(for display: DisplayInfo) -> CornerRule {
+        state.preferences.cornerRules[display.id] ?? .separate
+    }
+
+    func cornerRule(forDisplayID id: String) -> CornerRule {
+        state.preferences.cornerRules[id] ?? .separate
+    }
+
+    func setCornerRule(_ rule: CornerRule, for display: DisplayInfo) {
+        state.preferences.cornerRules[display.id] = rule
+        refreshRestingDrawers(display: display)
+    }
+
     func setDrawerSize(_ size: DrawerSize, for edge: DrawerEdge, display: DisplayInfo) {
         var settings = state.preferences.drawers[display.id] ?? [:]
         settings[edge.rawValue] = DrawerSize(width: min(1, max(0.05, size.width)),
                                              height: min(1, max(0.05, size.height)))
         state.preferences.drawers[display.id] = settings
-        refreshRestingDrawers(for: edge, display: display)
+        refreshRestingDrawers(display: display)
     }
 
     func resetDrawerSize(for edge: DrawerEdge, display: DisplayInfo) {
         state.preferences.drawers[display.id]?.removeValue(forKey: edge.rawValue)
-        refreshRestingDrawers(for: edge, display: display)
+        refreshRestingDrawers(display: display)
     }
 
-    private func refreshRestingDrawers(for edge: DrawerEdge, display: DisplayInfo) {
-        for drawer in activeDrawers where drawer.edge == edge && drawer.displayID == display.id && !drawer.expanded {
-            _ = WindowAccess.setDrawerFrame(edge: edge, expanded: false, display: display.visibleFrame,
-                                            collapsedSize: drawerSize(for: edge, display: display),
-                                            expandedRect: drawer.expandedRect,
+    // Requested drawers at a position: edges 0 to 8 (default 1), corners 0 or 1 (default off).
+    func drawerCount(for edge: DrawerEdge, displayID: String) -> Int {
+        let stored = state.preferences.drawerCounts[displayID]?[edge.rawValue] ?? DrawerGeometry.defaultCount(for: edge)
+        return min(edge.isCorner ? 1 : DrawerGeometry.maxSlots, max(0, stored))
+    }
+
+    func drawerCount(for edge: DrawerEdge, display: DisplayInfo) -> Int {
+        drawerCount(for: edge, displayID: display.id)
+    }
+
+    func setDrawerCount(_ count: Int, for edge: DrawerEdge, display: DisplayInfo) {
+        var settings = state.preferences.drawerCounts[display.id] ?? [:]
+        settings[edge.rawValue] = min(edge.isCorner ? 1 : DrawerGeometry.maxSlots, max(0, count))
+        state.preferences.drawerCounts[display.id] = settings
+        refreshRestingDrawers(display: display)
+    }
+
+    // A position is enabled when its count is above 0 and the display's corner rule allows it.
+    func isDrawerEnabled(_ edge: DrawerEdge, displayID: String) -> Bool {
+        edge.isLegal(for: cornerRule(forDisplayID: displayID)) && drawerCount(for: edge, displayID: displayID) > 0
+    }
+
+    // Slots a position really has: the requested count, capped by the grid cells along it when snapping.
+    func effectiveDrawerCount(for edge: DrawerEdge, display: DisplayInfo) -> Int {
+        drawerRects(for: display).keys.filter { $0.edge == edge }.count
+    }
+
+    // The enabled edge a saved assignment uses now: the rule's edge, else the nearest enabled edge
+    // (around the screen, clockwise first on a tie), else nil so the window stays normal.
+    func usableDrawerEdge(_ edge: DrawerEdge, displayID: String) -> DrawerEdge? {
+        let resolved = edge.resolved(for: cornerRule(forDisplayID: displayID))
+        if isDrawerEnabled(resolved, displayID: displayID) { return resolved }
+        let ring = DrawerEdge.allCases
+        guard let from = ring.firstIndex(of: resolved) else { return nil }
+        func distance(_ other: DrawerEdge) -> (Int, Int) {
+            let forward = ((ring.firstIndex(of: other) ?? 0) - from + ring.count) % ring.count
+            return (min(forward, ring.count - forward), forward)
+        }
+        return ring.filter { !$0.isCorner && isDrawerEnabled($0, displayID: displayID) }
+            .min { distance($0) < distance($1) }
+    }
+
+    // Resting rectangles for every legal drawer slot on a display, in `area` (default: the display's
+    // visible frame). The single source for the editor preview, restore and live drawers.
+    func drawerRects(for display: DisplayInfo, in area: CGRect? = nil, enabling extra: DrawerEdge? = nil) -> [DrawerKey: CGRect] {
+        var configured: [DrawerEdge: DrawerSize] = [:]
+        var counts: [DrawerEdge: Int] = [:]
+        for (key, size) in state.preferences.drawers[display.id] ?? [:] {
+            if let edge = DrawerEdge(rawValue: key) { configured[edge] = size }
+        }
+        for edge in DrawerEdge.allCases { counts[edge] = drawerCount(for: edge, display: display) }
+        if let extra, counts[extra] == 0 { counts[extra] = 1 }
+        let snap = grid(for: display).snapToGrid
+        return DrawerGeometry.rects(in: area ?? display.visibleFrame, configured: configured, rule: cornerRule(for: display),
+                                    counts: counts, grid: snap ? gridGeometry(for: display) : nil)
+    }
+
+    func isDrawerConfigured(_ edge: DrawerEdge, display: DisplayInfo) -> Bool {
+        state.preferences.drawers[display.id]?[edge.rawValue] != nil
+    }
+
+    // The drawer a placement uses now, with the rule's edge and a clamped slot. No logging.
+    func drawerKey(for placement: WindowPlacement) -> DrawerKey? {
+        guard let edge = placement.drawer,
+              let display = displays.first(where: { $0.id == placement.displayID }) else { return nil }
+        guard let resolved = usableDrawerEdge(edge, displayID: display.id) else { return nil }
+        let count = effectiveDrawerCount(for: resolved, display: display)
+        guard count > 0 else { return nil }
+        return DrawerKey(edge: resolved, slot: min(max(0, placement.drawerSlot), count - 1))
+    }
+
+    // Other windows in the layout that use the same drawer slot on a display.
+    func drawerOccupants(of key: DrawerKey, displayID: String, excluding windowID: UUID, in layout: SavedLayout) -> [WindowPlacement] {
+        layout.windows.filter { $0.id != windowID && $0.displayID == displayID && drawerKey(for: $0) == key }
+    }
+
+    // The drawer and resting frame a saved drawer assignment uses now. A corner assignment that is
+    // illegal under the display's rule maps to the rule's edge, and a slot beyond the current count
+    // maps to the last slot; the saved layout is not changed.
+    private func restingTarget(for edge: DrawerEdge, slot: Int, display: DisplayInfo, placement: WindowPlacement? = nil) -> (key: DrawerKey, frame: CGRect)? {
+        let rule = cornerRule(for: display)
+        let ruleEdge = edge.resolved(for: rule)
+        let usable = usableDrawerEdge(edge, displayID: display.id)
+        if let placement {
+            if ruleEdge != edge, usable == ruleEdge,
+               loggedCornerRemaps.insert("\(placement.id)-\(rule.rawValue)").inserted {
+                log("\(placement.appName): \(edge.title) drawer is unavailable with \(rule.title.lowercased()) corners; using \(ruleEdge.title.lowercased())")
+            } else if usable != ruleEdge,
+                      loggedCornerRemaps.insert("\(placement.id)-disabled-\(ruleEdge.rawValue)-\(usable?.rawValue ?? "none")").inserted {
+                log("\(placement.appName): \(ruleEdge.title) drawer is disabled; \(usable.map { "using \($0.title.lowercased())" } ?? "staying normal")")
+            }
+        }
+        guard let resolved = usable else { return nil }
+        let rects = drawerRects(for: display)
+        let count = rects.keys.filter { $0.edge == resolved }.count
+        guard count > 0 else { return nil }
+        let clamped = min(max(0, slot), count - 1)
+        if clamped != slot, let placement,
+           loggedSlotClamps.insert("\(placement.id)-\(resolved.rawValue)-\(count)").inserted {
+            log("\(placement.appName): \(resolved.title) drawer slot \(slot + 1) is beyond the \(count) available; using slot \(clamped + 1)")
+        }
+        let key = DrawerKey(edge: resolved, slot: clamped)
+        guard let frame = rects[key] else { return nil }
+        return (key, frame)
+    }
+
+    private func refreshRestingDrawers(display: DisplayInfo) {
+        for drawer in activeDrawers where drawer.displayID == display.id && !drawer.expanded {
+            guard let target = restingTarget(for: drawer.edge, slot: drawer.slot, display: display) else { continue }
+            _ = WindowAccess.setDrawerFrame(edge: target.key.edge, expanded: false, display: display.visibleFrame,
+                                            restingFrame: target.frame, expandedRect: drawer.expandedRect,
                                             windowID: drawer.windowID, bundleID: drawer.bundleID)
         }
     }
@@ -421,10 +565,9 @@ import SpaceBridge
         let restingPlacements = layout.windows.map { placement -> WindowPlacement in
             var resting = placement
             if let edge = placement.drawer,
-               let display = displays.first(where: { $0.id == placement.displayID }) {
-                resting.rect = UnitRect(edge.frame(in: display.visibleFrame,
-                                                   size: drawerSize(for: edge, display: display)),
-                                        in: display.visibleFrame)
+               let display = displays.first(where: { $0.id == placement.displayID }),
+               let target = restingTarget(for: edge, slot: placement.drawerSlot, display: display, placement: placement) {
+                resting.rect = UnitRect(target.frame, in: display.visibleFrame)
             }
             return resting
         }
@@ -449,16 +592,25 @@ import SpaceBridge
         startDrawers(for: layout)
     }
 
+    func setDrawerSlot(_ slot: Int, for windowID: UUID) {
+        guard let layoutIndex = selectedLayoutIndex,
+              let windowIndex = state.layouts[layoutIndex].windows.firstIndex(where: { $0.id == windowID }) else { return }
+        state.layouts[layoutIndex].windows[windowIndex].drawerSlot = max(0, slot)
+        state.layouts[layoutIndex].savedAt = .now
+    }
+
     func setDrawer(_ edge: DrawerEdge?, for windowID: UUID) {
         guard let layoutIndex = selectedLayoutIndex,
               let windowIndex = state.layouts[layoutIndex].windows.firstIndex(where: { $0.id == windowID }) else { return }
         // The window keeps its existing rect: it becomes the drawer's active frame.
         state.layouts[layoutIndex].windows[windowIndex].drawer = edge
+        state.layouts[layoutIndex].windows[windowIndex].drawerSlot = 0
         state.layouts[layoutIndex].savedAt = .now
     }
 
     private func startDrawers(for layout: SavedLayout) {
         var claimed: Set<UInt32> = []
+        var slotOwners: [String: String] = [:]
         for placement in layout.windows {
             guard displays.contains(where: { $0.id == placement.displayID }) else { continue }
             let windowID = WindowAccess.windowID(for: placement, claimed: claimed)
@@ -466,15 +618,21 @@ import SpaceBridge
             guard let edge = placement.drawer else { continue }
             guard windowID != 0 else { log("Drawer window unavailable: \(placement.appName)"); continue }
             guard let display = displays.first(where: { $0.id == placement.displayID }),
-                  WindowAccess.setDrawerFrame(edge: edge, expanded: false, display: display.visibleFrame,
-                                               collapsedSize: drawerSize(for: edge, display: display),
+                  let target = restingTarget(for: edge, slot: placement.drawerSlot, display: display, placement: placement),
+                  WindowAccess.setDrawerFrame(edge: target.key.edge, expanded: false, display: display.visibleFrame,
+                                               restingFrame: target.frame,
                                                expandedRect: placement.rect,
                                                windowID: windowID, bundleID: placement.bundleID) else {
                 log("Could not position drawer: \(placement.appName)")
                 continue
             }
+            let owner = "\(placement.displayID)-\(target.key.edge.rawValue)-\(target.key.slot)"
+            if let other = slotOwners[owner] {
+                log("\(placement.appName) shares the \(target.key.edge.title.lowercased()) drawer slot \(target.key.slot + 1) with \(other); the focused one expands and the other stays collapsed")
+            }
+            slotOwners[owner] = placement.appName
             activeDrawers.append(ActiveDrawer(windowID: windowID, bundleID: placement.bundleID,
-                                              displayID: placement.displayID, edge: edge,
+                                              displayID: placement.displayID, edge: target.key.edge, slot: target.key.slot,
                                               expandedRect: placement.rect))
         }
         guard !activeDrawers.isEmpty else { return }
@@ -497,8 +655,9 @@ import SpaceBridge
             guard expanded != activeDrawers[index].expanded,
                   let display = displays.first(where: { $0.id == activeDrawers[index].displayID }) else { continue }
             let drawer = activeDrawers[index]
-            if WindowAccess.setDrawerFrame(edge: drawer.edge, expanded: expanded, display: display.visibleFrame,
-                                            collapsedSize: drawerSize(for: drawer.edge, display: display),
+            guard let target = restingTarget(for: drawer.edge, slot: drawer.slot, display: display) else { continue }
+            if WindowAccess.setDrawerFrame(edge: target.key.edge, expanded: expanded, display: display.visibleFrame,
+                                            restingFrame: target.frame,
                                             expandedRect: drawer.expandedRect,
                                             windowID: drawer.windowID, bundleID: drawer.bundleID) {
                 activeDrawers[index].expanded = expanded
