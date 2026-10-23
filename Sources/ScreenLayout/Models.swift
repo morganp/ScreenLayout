@@ -98,6 +98,10 @@ struct DisplayInfo: Identifiable, Hashable {
 }
 
 struct WindowPlacement: Codable, Identifiable, Hashable {
+    enum CodingKeys: String, CodingKey {
+        case id, bundleID, appName, title, ordinal, displayID, rect, spaceID, drawer, drawerSlot, requiresTitleMatch
+    }
+
     var id: UUID = UUID()
     var bundleID: String
     var appName: String
@@ -108,6 +112,7 @@ struct WindowPlacement: Codable, Identifiable, Hashable {
     var spaceID: UUID? = nil
     var drawer: DrawerEdge? = nil
     var drawerSlot = 0
+    var requiresTitleMatch = false
 }
 
 extension WindowPlacement {
@@ -123,6 +128,22 @@ extension WindowPlacement {
         spaceID = try values.decodeIfPresent(UUID.self, forKey: .spaceID)
         drawer = try values.decodeIfPresent(DrawerEdge.self, forKey: .drawer)
         drawerSlot = try values.decodeIfPresent(Int.self, forKey: .drawerSlot) ?? 0
+        requiresTitleMatch = try values.decodeIfPresent(Bool.self, forKey: .requiresTitleMatch) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id)
+        try values.encode(bundleID, forKey: .bundleID)
+        try values.encode(appName, forKey: .appName)
+        try values.encode(title, forKey: .title)
+        try values.encode(ordinal, forKey: .ordinal)
+        try values.encode(displayID, forKey: .displayID)
+        try values.encode(rect, forKey: .rect)
+        try values.encodeIfPresent(spaceID, forKey: .spaceID)
+        try values.encodeIfPresent(drawer, forKey: .drawer)
+        try values.encode(drawerSlot, forKey: .drawerSlot)
+        if requiresTitleMatch { try values.encode(true, forKey: .requiresTitleMatch) }
     }
 }
 

@@ -28,6 +28,7 @@ import CoreServices
     func applicationDidBecomeActive(_ notification: Notification) {
         let store = LayoutStore.shared
         store.refreshAccessibility()
+        store.refreshScreenRecording()
         store.refreshFocusNames()
         store.refreshSpaces()
         store.refreshLoginItem()

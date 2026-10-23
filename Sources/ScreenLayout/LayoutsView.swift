@@ -231,12 +231,32 @@ struct LayoutEditor: View {
 
 private struct LayoutCardStrip: View {
     @Bindable var store: LayoutStore
+    @State private var layoutToDelete: SavedLayout?
 
     var body: some View {
+        let otherSets = store.monitorSets.filter { $0 != store.displaySet }
+        let otherCount = otherSets.reduce(0) { $0 + store.layouts(forDisplaySet: $1).count }
         ScrollView(.horizontal) {
             HStack(spacing: 10) {
                 ForEach(store.layouts(forDisplaySet: store.displaySet)) { layout in
                     LayoutCard(store: store, layout: layout)
+                }
+                if otherCount > 0 {
+                    Menu {
+                        ForEach(otherSets, id: \.self) { set in
+                            Menu(store.displayNames(forDisplaySet: set).joined(separator: " + ")) {
+                                ForEach(store.layouts(forDisplaySet: set)) { layout in
+                                    Button("Delete ‘\(layout.name)’ · \(layout.windows.count) windows · \(layout.savedAt.formatted(date: .abbreviated, time: .shortened))…",
+                                           role: .destructive) {
+                                        layoutToDelete = layout
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        Label("Other monitor setups (\(otherCount))", systemImage: "display.2")
+                    }
+                    .help("Manage layouts saved for a different set of monitors")
                 }
                 Menu {
                     Button("New blank layout", action: store.createBlankLayout)
@@ -254,6 +274,16 @@ private struct LayoutCardStrip: View {
             .padding(.horizontal, 12).padding(.vertical, 10)
         }
         .scrollBounceBehavior(.basedOnSize)
+        .confirmationDialog("Delete ‘\(layoutToDelete?.name ?? "layout")’?",
+                            isPresented: Binding(get: { layoutToDelete != nil },
+                                                 set: { if !$0 { layoutToDelete = nil } })) {
+            Button("Delete layout", role: .destructive) {
+                if let layoutToDelete { store.deleteLayout(layoutToDelete.id) }
+                layoutToDelete = nil
+            }
+        } message: {
+            Text("This removes the saved layout and its Focus assignments.")
+        }
     }
 }
 

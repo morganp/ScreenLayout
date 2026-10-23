@@ -2,7 +2,7 @@
 
 ## Current behavior
 
-The editor canvas represents one physical display and one saved Space slot at a time. `WindowAccess.capture` reads accessible windows from running apps and records their display and frame. It does not record a macOS Space identifier. Desktop slots are matched in order to the desktop Spaces already present on each display. `Restore this layout` moves matched windows to those Spaces, verifies each assignment, then applies its saved frame. It does not create Spaces or enter full screen.
+The editor canvas represents one physical display and one saved Space slot at a time. Capture creates a slot for every existing desktop Space on each connected display and records the Space of each window. Accessibility supplies windows on active Spaces; with Screen Recording permission, WindowServer information fills in windows that Accessibility omits on inactive Spaces. It excludes Finder's desktop surface. Desktop slots are matched in order to the desktop Spaces already present on each display. `Restore this layout` moves matched accessible windows to those Spaces, verifies each assignment, then applies its saved frame. A window captured from WindowServer may be skipped until Accessibility exposes it. The app does not create Spaces or enter full screen.
 
 ## Layout model
 

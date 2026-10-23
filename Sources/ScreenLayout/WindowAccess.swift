@@ -35,7 +35,11 @@ enum WindowAccess {
     }
 
     private static func windows(for app: NSRunningApplication) -> [AXUIElement] {
-        value(appElement(app.processIdentifier), kAXWindowsAttribute) ?? []
+        let elements: [AXUIElement] = value(appElement(app.processIdentifier), kAXWindowsAttribute) ?? []
+        return elements.filter { element in
+            let role: String? = value(element, kAXRoleAttribute)
+            return role == kAXWindowRole as String
+        }
     }
 
     private static func match(_ placement: WindowPlacement, in candidates: [AXUIElement],
@@ -44,6 +48,7 @@ enum WindowAccess {
             (value($0, kAXTitleAttribute) as String?) == placement.title &&
             !claimed.contains(SLWindowIDForAXElement($0))
         })
+        if placement.requiresTitleMatch { return titled }
         let ordinal = candidates.indices.contains(placement.ordinal) ? candidates[placement.ordinal] : nil
         return titled ?? (ordinal.flatMap { claimed.contains(SLWindowIDForAXElement($0)) ? nil : $0 })
             ?? candidates.first(where: { !claimed.contains(SLWindowIDForAXElement($0)) })
@@ -198,7 +203,8 @@ enum WindowAccess {
     private static func makePlacement(app: NSRunningApplication, bundleID: String, window: AXUIElement,
                                       ordinal: Int, displays: [DisplayInfo]) -> WindowPlacement? {
         guard let frame = Self.frame(of: window), frame.width > 10, frame.height > 10,
-              let display = displays.max(by: { $0.frame.intersection(frame).area < $1.frame.intersection(frame).area }) else { return nil }
+              let display = displays.max(by: { $0.frame.intersection(frame).area < $1.frame.intersection(frame).area }),
+              display.frame.intersection(frame).area > 0 else { return nil }
         let title: String = value(window, kAXTitleAttribute) ?? ""
         return WindowPlacement(bundleID: bundleID, appName: app.localizedName ?? bundleID,
                                title: title, ordinal: ordinal, displayID: display.id,
@@ -247,19 +253,63 @@ enum WindowAccess {
         return ok
     }
 
-    static func capture(displays: [DisplayInfo]) -> [WindowPlacement] {
-        guard trusted else { return [] }
+    static func capture(displays: [DisplayInfo], desktopSlots: [String: [UInt64: UUID]])
+        -> (windows: [WindowPlacement], additionalWindows: Int, skipped: Int) {
+        guard trusted else { return ([], 0, 0) }
         var result: [WindowPlacement] = []
+        var skipped = 0
+        var capturedIDs: Set<UInt32> = []
         for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
             guard let bundleID = app.bundleIdentifier, bundleID != Bundle.main.bundleIdentifier else { continue }
             for (ordinal, window) in windows(for: app).enumerated() {
-                if let placement = makePlacement(app: app, bundleID: bundleID, window: window,
-                                                 ordinal: ordinal, displays: displays) {
-                    result.append(placement)
+                guard var placement = makePlacement(app: app, bundleID: bundleID, window: window,
+                                                    ordinal: ordinal, displays: displays) else { continue }
+                let windowID = SLWindowIDForAXElement(window)
+                guard windowID != 0,
+                      let slotID = desktopSlots[placement.displayID]?[SLSpaceForWindow(windowID)] else {
+                    skipped += 1
+                    continue
                 }
+                placement.spaceID = slotID
+                result.append(placement)
+                capturedIDs.insert(windowID)
             }
         }
-        return result
+        // AX often omits windows on inactive Spaces. WindowServer still exposes their owner,
+        // title, frame and Space, so include those with a title that can be matched safely later.
+        guard CGPreflightScreenCaptureAccess() else { return (result, 0, skipped) }
+        let runningApps = Dictionary(uniqueKeysWithValues: NSWorkspace.shared.runningApplications.compactMap {
+            app -> (pid_t, NSRunningApplication)? in
+            guard app.activationPolicy == .regular,
+                  let bundleID = app.bundleIdentifier,
+                  bundleID != Bundle.main.bundleIdentifier else { return nil }
+            return (app.processIdentifier, app)
+        })
+        let windowInfo = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
+        var additionalWindows = 0
+        for info in windowInfo {
+            guard let windowID = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                  windowID != 0, !capturedIDs.contains(windowID),
+                  (info[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+                  let pid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+                  let app = runningApps[pid], let bundleID = app.bundleIdentifier,
+                  let title = info[kCGWindowName as String] as? String, !title.isEmpty,
+                  let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary),
+                  frame.width > 10, frame.height > 10,
+                  let display = displays.max(by: { $0.frame.intersection(frame).area < $1.frame.intersection(frame).area }),
+                  display.frame.intersection(frame).area > 0,
+                  let slotID = desktopSlots[display.id]?[SLSpaceForWindow(windowID)] else { continue }
+            var placement = WindowPlacement(bundleID: bundleID, appName: app.localizedName ?? bundleID,
+                                            title: title, ordinal: 0, displayID: display.id,
+                                            rect: UnitRect(frame, in: display.visibleFrame))
+            placement.spaceID = slotID
+            placement.requiresTitleMatch = true
+            result.append(placement)
+            capturedIDs.insert(windowID)
+            additionalWindows += 1
+        }
+        return (result, additionalWindows, skipped)
     }
 
     static func restore(_ placements: [WindowPlacement], displays: [DisplayInfo]) -> (moved: Int, skipped: Int) {
@@ -296,7 +346,13 @@ enum WindowAccess {
                 skipped += 1
                 continue
             }
-            guard let window = match(placement, in: windows(for: app), claimed: usedWindowIDs) else { skipped += 1; continue }
+            guard let window = match(placement, in: windows(for: app), claimed: usedWindowIDs) else {
+                if placement.requiresTitleMatch {
+                    diagnostics?("Skipped \(placement.appName): its saved window is not exposed through Accessibility; open its desktop Space and retry")
+                }
+                skipped += 1
+                continue
+            }
             let windowID = SLWindowIDForAXElement(window)
             guard windowID != 0 else { skipped += 1; continue }
             usedWindowIDs.insert(windowID)

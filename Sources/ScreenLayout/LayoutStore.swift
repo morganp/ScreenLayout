@@ -17,6 +17,7 @@ import SpaceBridge
     var selectedWindowID: UUID?
     var status = "Ready"
     var accessibilityTrusted = WindowAccess.trusted
+    var screenRecordingTrusted = CGPreflightScreenCaptureAccess()
     var newModeName = ""
     var focusNames: [String] = []
     var focusCatalogError: String?
@@ -71,6 +72,7 @@ import SpaceBridge
         refreshDisplays(reason: "Startup")
         refreshFocusNames()
         log("Accessibility trusted: \(accessibilityTrusted)")
+        log("Screen Recording trusted: \(screenRecordingTrusted)")
         log("Space move operation available: \(SLCanMoveWindows())")
         let pointer = Unmanaged.passUnretained(self).toOpaque()
         let error = CGDisplayRegisterReconfigurationCallback(displayCallback, pointer)
@@ -268,6 +270,17 @@ import SpaceBridge
         let trusted = WindowAccess.trusted
         if trusted != accessibilityTrusted { log("Accessibility trusted: \(trusted)") }
         accessibilityTrusted = trusted
+    }
+
+    func refreshScreenRecording() {
+        let trusted = CGPreflightScreenCaptureAccess()
+        if trusted != screenRecordingTrusted { log("Screen Recording trusted: \(trusted)") }
+        screenRecordingTrusted = trusted
+    }
+
+    func requestScreenRecording() {
+        _ = CGRequestScreenCaptureAccess()
+        refreshScreenRecording()
     }
 
     func refreshLoginItem() { loginItemTick += 1 }
@@ -500,28 +513,90 @@ import SpaceBridge
         }
     }
 
+    private func defaultLayoutName() -> String {
+        let names = displays.sorted { left, right in
+            let leftBuiltIn = CGDisplayIsBuiltin(left.cgID) != 0
+            let rightBuiltIn = CGDisplayIsBuiltin(right.cgID) != 0
+            if leftBuiltIn != rightBuiltIn { return leftBuiltIn }
+            let comparison = left.name.localizedStandardCompare(right.name)
+            return comparison == .orderedSame ? left.id < right.id : comparison == .orderedAscending
+        }.map { display in
+            CGDisplayIsBuiltin(display.cgID) != 0 ? "Built-in" : display.name
+        }
+        let monitors = names.isEmpty ? "ScreenLayout" : names.joined(separator: " + ")
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        let base = "\(monitors) — \(formatter.string(from: .now))"
+        var name = base
+        var number = 2
+        while state.layouts.contains(where: { $0.name == name }) {
+            name = "\(base) (\(number))"
+            number += 1
+        }
+        return name
+    }
+
     func capture() {
         accessibilityTrusted = WindowAccess.trusted
         guard accessibilityTrusted else { WindowAccess.requestPermission(); status = "Accessibility is not trusted for this build"; log(status); return }
-        var windows = WindowAccess.capture(displays: displays)
-        let slots = displays.map { Self.defaultSlot(for: $0.id) }
-        for index in windows.indices {
-            windows[index].spaceID = slots.first(where: { $0.displayID == windows[index].displayID })?.id
+        guard let inventories = SpaceInventory.current() else {
+            status = "Cannot capture: desktop Spaces are unavailable"
+            log(status)
+            return
         }
-        let layout = SavedLayout(name: "Capture \(Date.now.formatted(date: .abbreviated, time: .shortened))",
+        refreshScreenRecording()
+        if inventories.contains(where: { $0.desktopCount > 1 }) && !screenRecordingTrusted {
+            requestScreenRecording()
+            if !screenRecordingTrusted {
+                status = "Screen Recording access is needed to capture windows in inactive Spaces"
+                log(status)
+                return
+            }
+        }
+        displaySpaces = inventories
+        var slots: [SpaceSlot] = []
+        var desktopSlots: [String: [UInt64: UUID]] = [:]
+        for display in displays {
+            guard let inventory = inventories.first(where: { $0.displayID == display.id }) else {
+                status = "Cannot capture: Spaces are unavailable for \(display.name)"
+                log(status)
+                return
+            }
+            let desktops = inventory.spaces.filter(\.isDesktop)
+            guard !desktops.isEmpty else {
+                status = "Cannot capture: no desktop Spaces found for \(display.name)"
+                log(status)
+                return
+            }
+            for (index, space) in desktops.enumerated() {
+                let slot = SpaceSlot(displayID: display.id, name: "Desktop \(index + 1)")
+                slots.append(slot)
+                desktopSlots[display.id, default: [:]][space.id] = slot.id
+            }
+        }
+        let captured = WindowAccess.capture(displays: displays, desktopSlots: desktopSlots)
+        let windows = captured.windows
+        let layout = SavedLayout(name: defaultLayoutName(),
                                  displaySet: displaySet, mode: currentMode, windows: windows, spaces: slots)
         state.layouts.append(layout)
         state.preferences.preferredLayouts[assignmentKey] = layout.id
         selectedLayoutID = layout.id
-        selectedSpaceID = slots.first(where: { $0.displayID == selectedDisplayID })?.id
-        selectedWindowID = windows.first?.id
-        status = "Captured \(windows.count) windows"
+        let currentSpace = inventories.first(where: { $0.displayID == selectedDisplayID })?.currentID
+        selectedSpaceID = currentSpace.flatMap { desktopSlots[selectedDisplayID ?? ""]?[$0] }
+            ?? slots.first(where: { $0.displayID == selectedDisplayID })?.id
+        selectedWindowID = windows.first(where: { $0.spaceID == selectedSpaceID })?.id
+        status = "Captured \(windows.count) windows across \(slots.count) desktop Spaces"
+        if captured.additionalWindows > 0 { status += "; \(captured.additionalWindows) found outside Accessibility" }
+        if captured.skipped > 0 { status += "; skipped \(captured.skipped) without a mapped desktop Space" }
         log(status)
     }
 
     func createBlankLayout() {
         let slots = displays.map { Self.defaultSlot(for: $0.id) }
-        let layout = SavedLayout(name: "New layout", displaySet: displaySet, mode: currentMode,
+        let layout = SavedLayout(name: defaultLayoutName(), displaySet: displaySet, mode: currentMode,
                                  windows: [], spaces: slots)
         state.layouts.append(layout)
         selectedLayoutID = layout.id
@@ -825,6 +900,12 @@ import SpaceBridge
 
     func deleteSelectedLayout() {
         guard let id = selectedLayoutID else { return }
+        deleteLayout(id)
+    }
+
+    func deleteLayout(_ id: UUID) {
+        guard state.layouts.contains(where: { $0.id == id }) else { return }
+        let wasSelected = selectedLayoutID == id
         if activeDrawerLayoutID == id {
             drawerTask?.cancel()
             drawerTask = nil
@@ -833,9 +914,11 @@ import SpaceBridge
         }
         state.layouts.removeAll { $0.id == id }
         state.preferences.preferredLayouts = state.preferences.preferredLayouts.filter { $0.value != id }
-        selectedLayoutID = layoutForEditor?.id
-        ensureSelectedSpace()
-        ensureSelectedWindow()
+        if wasSelected {
+            selectedLayoutID = layoutForEditor?.id
+            ensureSelectedSpace()
+            ensureSelectedWindow()
+        }
     }
 
     func assignedLayoutID(mode: String, displaySet: String) -> UUID? {

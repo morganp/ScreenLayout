@@ -1,4 +1,6 @@
 import SwiftUI
+import CoreGraphics
+import AppKit
 
 struct SettingsView: View {
     @Bindable var store: LayoutStore
@@ -67,6 +69,17 @@ struct SettingsView: View {
                 if !store.accessibilityTrusted {
                     Button("Check Accessibility access") { store.refreshDisplays(reason: "Permission check") }
                     Button("Open Accessibility permission prompt", action: WindowAccess.requestPermission)
+                }
+            }
+            Section("Screen Recording") {
+                LabeledContent("Status", value: store.screenRecordingTrusted ? "Ready" : "Needed for inactive Spaces")
+                if !store.screenRecordingTrusted {
+                    Button("Request Screen Recording access", action: store.requestScreenRecording)
+                    Button("Open Screen Recording settings") {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
                 }
             }
             Section("Displays and Spaces") {
